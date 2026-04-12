@@ -30,16 +30,17 @@ def add_postprocess(tokenizer):
     return tokenizer
 
 def train_bpe():
-    tokenizer = Tokenizer(BPE(unk_token="<unk>"))
+    tokenizer = Tokenizer(BPE(unk_token="<unk>", end_of_word_suffix="</w>"))
     tokenizer.normalizer = NFC()
     tokenizer.pre_tokenizer = Whitespace()
-    tokenizer.decoder = BPEDecoder()
+    tokenizer.decoder = BPEDecoder(suffix="</w>")
 
     trainer = BpeTrainer(
         vocab_size=VOCAB_SIZE,
         min_frequency=MIN_FREQ,
         special_tokens=SPECIAL_TOKENS,
         show_progress=True,
+        end_of_word_suffix="</w>"
     )
 
     tokenizer.train(files=CORPUS, trainer=trainer)
