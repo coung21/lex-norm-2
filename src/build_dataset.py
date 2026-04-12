@@ -1,4 +1,5 @@
 import pandas as pd 
+import torch
 from torch.utils.data import Dataset
 
 class NormDataset(Dataset):
@@ -33,8 +34,8 @@ class NormDataset(Dataset):
         labels = [x if x != self.tokenizer.pad_token_id else -100 for x in labels]
         
         return {
-            'input_ids': src_enc['input_ids'],
-            'attention_mask': src_enc['attention_mask'],
-            'labels': labels
+            'input_ids': torch.tensor(src_enc['input_ids'], dtype=torch.long),
+            'attention_mask': torch.tensor(src_enc['attention_mask'], dtype=torch.long),
+            'labels': torch.tensor(labels, dtype=torch.long)
         }
         
