@@ -97,5 +97,5 @@ if __name__ == "__main__":
     args = parser.parse_args()
     wandb.init(project="lexnorm2", name=args.run_name)
     save_path = Path("models") / args.run_name
-    save_path.mkdir(exist_ok=True)
+    save_path.mkdir(exist_ok=True, parents=True)
     run_train(args.tokenizer_dir, args.train_file, save_path, args.dev_path, args.epochs, args.batch_size)    
