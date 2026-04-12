@@ -47,8 +47,8 @@ def run_train(tokenizer_dir, train_file, save_path, dev_path=None, epochs=5, bat
     model.train()
     for epoch in range(epochs):
         for batch in train_dl:
-            src_ids = torch.tensor(batch['input_ids'], device=DEVICE)
-            labels = torch.tensor(batch['labels'], device=DEVICE)
+            src_ids = batch['input_ids'].to(DEVICE)
+            labels = batch['labels'].to(DEVICE)
 
             dec_ids = shift_right(labels, tokenizer.bos_token_id, tokenizer.pad_token_id)
             
@@ -67,8 +67,8 @@ def run_train(tokenizer_dir, train_file, save_path, dev_path=None, epochs=5, bat
             with torch.no_grad():
                 dev_loss = 0
                 for batch in dev_dl:
-                    src_ids = torch.tensor(batch['input_ids'], device=DEVICE)
-                    labels = torch.tensor(batch['labels'], device=DEVICE)
+                    src_ids = batch['input_ids'].to(DEVICE)
+                    labels = batch['labels'].to(DEVICE)
 
                     dec_ids = shift_right(labels, tokenizer.bos_token_id, tokenizer.pad_token_id)
                     logits = model(src_ids, dec_ids)

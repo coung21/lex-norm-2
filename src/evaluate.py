@@ -93,7 +93,7 @@ class Evaluator:
         
         with torch.no_grad():
             for batch_idx, batch in enumerate(self.dev_dl):
-                src_ids = torch.tensor(batch['input_ids'], device=DEVICE)
+                src_ids = batch['input_ids'].to(DEVICE)
                 pred_ids = self.greedy_decode(src_ids)
                 
                 for idx in range(src_ids.size(0)):
