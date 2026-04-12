@@ -1,35 +1,43 @@
-import torch
-from transformers import PreTrainedTokenizerFast
-import math
-import sys
-import os
+"""
+Metrics:
+- Exact Match (EM)
+- Character Error Rate (CER)
+- Word Error Rate (WER)
+- Error Reduction Rate (ERR)
+"""
 
+import torch
+from transformers import PreTrainedTokenizerFast, BartForConditionalGeneration
 from build_dataset import NormDataset
 from torch.utils.data import DataLoader
-from model import Seq2SeqTransformer
 import wandb
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
+
 def edit_distance(ref, hyp):
-    if len(ref) > len(hyp):
-        ref, hyp = hyp, ref
-    distances = range(len(ref) + 1)
-    for i2, c2 in enumerate(hyp):
-        distances_ = [i2+1]
-        for i1, c1 in enumerate(ref):
-            if c1 == c2:
-                distances_.append(distances[i1])
+    """Tính Levenshtein edit distance giữa 2 chuỗi/list."""
+    n, m = len(ref), len(hyp)
+    dp = list(range(m + 1))
+    for i in range(1, n + 1):
+        prev, dp[0] = dp[0], i
+        for j in range(1, m + 1):
+            temp = dp[j]
+            if ref[i - 1] == hyp[j - 1]:
+                dp[j] = prev
             else:
-                distances_.append(1 + min((distances[i1], distances[i1 + 1], distances_[-1])))
-        distances = distances_
-    return distances[-1]
+                dp[j] = 1 + min(prev, dp[j], dp[j - 1])
+            prev = temp
+    return dp[m]
+
 
 def calculate_wer(ref, hyp):
     return edit_distance(ref.split(), hyp.split())
 
+
 def calculate_cer(ref, hyp):
     return edit_distance(list(ref), list(hyp))
+
 
 class Evaluator:
     def __init__(self, model_path, tokenizer_dir, dev_path, batch_size=32):
@@ -40,40 +48,13 @@ class Evaluator:
             pad_token="<pad>",
             unk_token="<unk>",
         )
-        self.model = Seq2SeqTransformer(
-            vocab_size=self.tokenizer.vocab_size,
-            pad_token_id=self.tokenizer.pad_token_id
-        ).to(DEVICE)
-        
-        self.model.load_state_dict(torch.load(model_path, map_location=DEVICE))
+
+        # Load model theo chuẩn HuggingFace
+        self.model = BartForConditionalGeneration.from_pretrained(model_path).to(DEVICE)
         self.model.eval()
-        
+
         self.dev_ds = NormDataset(dev_path, self.tokenizer)
         self.dev_dl = DataLoader(self.dev_ds, batch_size=batch_size, shuffle=False)
-
-    def greedy_decode(self, src_ids, max_len=128):
-        batch_size = src_ids.size(0)
-        src_key_padding_mask = src_ids.eq(self.tokenizer.pad_token_id)
-        src = self.model.pos_encoder(self.model.embed(src_ids) * math.sqrt(self.model.d_model))
-        memory = self.model.transformer.encoder(src, src_key_padding_mask=src_key_padding_mask)
-
-        ys = torch.full((batch_size, 1), self.tokenizer.bos_token_id, dtype=torch.long, device=DEVICE)
-        finished = torch.zeros(batch_size, dtype=torch.bool, device=DEVICE)
-
-        for _ in range(max_len - 1):
-            tgt_len = ys.size(1)
-            tgt_mask = self.model.transformer.generate_square_subsequent_mask(tgt_len).to(DEVICE)
-            tgt = self.model.pos_encoder(self.model.embed(ys) * math.sqrt(self.model.d_model))
-            out = self.model.transformer.decoder(
-                tgt, memory, tgt_mask=tgt_mask, memory_key_padding_mask=src_key_padding_mask
-            )
-            prob = self.model.fc_out(out[:, -1, :])
-            _, next_word = torch.max(prob, dim=1)
-            ys = torch.cat([ys, next_word.unsqueeze(1)], dim=1)
-            finished |= (next_word == self.tokenizer.eos_token_id)
-            if finished.all():
-                break
-        return ys
 
     def evaluate(self):
         total_exact_match = 0
@@ -83,45 +64,61 @@ class Evaluator:
         total_gt_words = 0
         total_gt_chars = 0
         total_samples = 0
-        
+
         # Tạo bảng logging cho WandB
         table = None
         if wandb.run is not None:
             table = wandb.Table(columns=["Original", "Ground Truth", "Prediction", "Correct?"])
 
         print("Starting Evaluation and Logging Inference...")
-        
+
         with torch.no_grad():
             for batch_idx, batch in enumerate(self.dev_dl):
                 src_ids = batch['input_ids'].to(DEVICE)
-                pred_ids = self.greedy_decode(src_ids)
-                
+                attn_mask = batch['attention_mask'].to(DEVICE)
+
+                # Dùng model.generate() thay vì tự viết greedy decode
+                generated_ids = self.model.generate(
+                    input_ids=src_ids,
+                    attention_mask=attn_mask,
+                    max_length=128,
+                    num_beams=1,  # greedy decoding
+                )
+
                 for idx in range(src_ids.size(0)):
                     dataset_idx = batch_idx * self.dev_dl.batch_size + idx
                     ex = self.dev_ds.data.iloc[dataset_idx]
-                    
+
                     original_text = str(ex['original']).strip()
                     ground_truth_text = str(ex['normalized']).strip()
-                    
-                    p_list = pred_ids[idx].tolist()
-                    if self.tokenizer.eos_token_id in p_list:
-                        eos_idx = p_list.index(self.tokenizer.eos_token_id)
-                        p_list = p_list[:eos_idx]
-                    p_list = [t for t in p_list if t not in [self.tokenizer.pad_token_id, self.tokenizer.bos_token_id]]
-                    predict_text = self.tokenizer.decode(p_list).strip()
-                    
+
+                    # Decode prediction — skip_special_tokens tự động bỏ <s>, </s>, <pad>
+                    predict_text = self.tokenizer.decode(
+                        generated_ids[idx], skip_special_tokens=True
+                    ).strip()
+
                     is_correct = (predict_text == ground_truth_text)
                     if is_correct:
                         total_exact_match += 1
-                        
-                    # Log vào WandB Table (giới hạn log 200 câu đầu hoặc ngẫu nhiên để view nhanh)
+
+                    # In ra vài mẫu đầu tiên để kiểm tra nhanh trên console
+                    if total_samples < 5:
+                        print(f"\n--- Sample {total_samples} ---")
+                        print(f"  Original : {original_text}")
+                        print(f"  GT       : {ground_truth_text}")
+                        print(f"  Raw IDs  : {generated_ids[idx][:20].tolist()}...")
+                        print(f"  Predict  : '{predict_text}'")
+                        print(f"  Correct  : {is_correct}")
+
+                    # Log vào WandB Table
                     if table is not None and total_samples < 200:
-                        table.add_data(original_text, ground_truth_text, predict_text, "✅" if is_correct else "❌")
-                    
+                        table.add_data(original_text, ground_truth_text, predict_text,
+                                       "✅" if is_correct else "❌")
+
                     total_wer_baseline += calculate_wer(ground_truth_text, original_text)
                     total_wer_model += calculate_wer(ground_truth_text, predict_text)
                     total_cer += calculate_cer(ground_truth_text, predict_text)
-                    
+
                     total_gt_words += len(ground_truth_text.split())
                     total_gt_chars += len(list(ground_truth_text))
                     total_samples += 1
@@ -134,19 +131,20 @@ class Evaluator:
         cer = total_cer / max(1, total_gt_chars)
         wer = total_wer_model / max(1, total_gt_words)
         err = (total_wer_baseline - total_wer_model) / total_wer_baseline if total_wer_baseline > 0 else 0.0
-            
-        print("="*40)
+
+        print("=" * 40)
         print(f"EVALUATION RESULTS ({total_samples} samples)")
         print(f"EM: {em_rate*100:.2f}% | WER: {wer*100:.2f}% | CER: {cer*100:.2f}% | ERR: {err*100:.2f}%")
-        
+
         if wandb.run is not None:
             wandb.log({
                 "eval/exact_match": em_rate * 100,
                 "eval/wer": wer * 100,
                 "eval/cer": cer * 100,
                 "eval/err": err * 100,
-                "eval/predictions": table
+                "eval/predictions": table,
             })
+
 
 if __name__ == "__main__":
     import argparse

@@ -30,7 +30,9 @@ class NormDataset(Dataset):
             return_tensors=None
         )
         
-        labels = tgt_enc['input_ids'][:]
+        # Bỏ <s> đầu tiên do TemplateProcessing thêm vào, giữ lại nội dung + </s>
+        # Labels chuẩn seq2seq: [t1, t2, ..., tn, </s>, -100, -100, ...]
+        labels = tgt_enc['input_ids'][1:] + [self.tokenizer.pad_token_id]
         labels = [x if x != self.tokenizer.pad_token_id else -100 for x in labels]
         
         return {
