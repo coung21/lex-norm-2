@@ -8,9 +8,9 @@ from tokenizers.processors import TemplateProcessing
 from tokenizers.decoders import BPEDecoder
 from tokenizers.decoders import ByteLevel as ByteLevelDecoder
 
-CORPUS = ["data/tokenizer_corpus/tokenizer_corpus.txt"]
+CORPUS = ["data/tokenizer_corpus/vien_corpus.txt"]
 SPECIAL_TOKENS = ["<pad>", "<s>", "</s>", "<unk>"]
-VOCAB_SIZE = 16000
+VOCAB_SIZE = 32000
 MIN_FREQ = 2
 
 def save_tokenizer(tokenizer, save_dir):
