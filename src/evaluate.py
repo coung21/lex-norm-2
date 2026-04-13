@@ -82,7 +82,7 @@ class Evaluator:
                     input_ids=src_ids,
                     attention_mask=attn_mask,
                     max_length=128,
-                    num_beams=5,               # Thay 1 bằng 5 để dùng Beam Search
+                    num_beams=2,               # Thay 1 bằng 5 để dùng Beam Search
                     no_repeat_ngram_size=2,    # Tránh vòng lặp n-gram (bị ngáo)
                     early_stopping=True,
                 )
