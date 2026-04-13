@@ -118,7 +118,11 @@ def main():
     wandb.init(project="lexnorm2", name=args.run_name)
 
     # ────── Load tokenizer & model ──────
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name, use_fast=False)
+    if "vit5" in args.model_name.lower():
+        from transformers import T5Tokenizer
+        tokenizer = T5Tokenizer.from_pretrained(args.model_name)
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(args.model_name, use_fast=False)
     model = AutoModelForSeq2SeqLM.from_pretrained(args.model_name)
 
     print(f"Model: {args.model_name}")
