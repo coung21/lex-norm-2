@@ -178,7 +178,7 @@ def main():
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         learning_rate=args.lr,
         weight_decay=0.01,
-        warmup_ratio=0.1,
+        warmup_steps=200,
         fp16=args.fp16,
         logging_steps=50,
         save_strategy="epoch",
@@ -199,7 +199,7 @@ def main():
         args=training_args,
         train_dataset=train_ds,
         eval_dataset=dev_ds,
-        tokenizer=tokenizer,
+        processing_class=tokenizer,
         data_collator=data_collator,
         compute_metrics=make_compute_metrics(tokenizer),
     )
