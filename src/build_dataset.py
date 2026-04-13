@@ -34,15 +34,14 @@ class NormDataset(Dataset):
             return_tensors=None,
         )
 
-        # Tokenize target với text_target hoặc trực tiếp
-        with self.tokenizer.as_target_tokenizer():
-            tgt_enc = self.tokenizer(
-                tgt_text,
-                max_length=self.max_tgt_len,
-                padding='max_length',
-                truncation=True,
-                return_tensors=None,
-            )
+        # Tokenize target
+        tgt_enc = self.tokenizer(
+            tgt_text,
+            max_length=self.max_tgt_len,
+            padding='max_length',
+            truncation=True,
+            return_tensors=None,
+        )
 
         # Thay pad_token_id bằng -100 trong labels (ignore trong CrossEntropy)
         labels = [
