@@ -1,22 +1,35 @@
 """
+Evaluation cho T5 / ByT5 trên ViLexNorm.
+
 Metrics:
 - Exact Match (EM)
 - Character Error Rate (CER)
 - Word Error Rate (WER)
 - Error Reduction Rate (ERR)
+
+Usage:
+    python src/evaluate.py \
+        --model_path outputs/t5-vilexnorm/best \
+        --dev_path data/ViLexNorm/data/dev.csv \
+        --run_name eval-t5-vilexnorm
 """
 
+import argparse
+
 import torch
-from transformers import PreTrainedTokenizerFast, BartForConditionalGeneration
-from build_dataset import NormDataset
+import pandas as pd
+from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 from torch.utils.data import DataLoader
+
 import wandb
+
+from build_dataset import NormDataset
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
 def edit_distance(ref, hyp):
-    """Tính Levenshtein edit distance giữa 2 chuỗi/list."""
+    """Levenshtein edit distance giữa 2 chuỗi/list."""
     n, m = len(ref), len(hyp)
     dp = list(range(m + 1))
     for i in range(1, n + 1):
@@ -40,17 +53,10 @@ def calculate_cer(ref, hyp):
 
 
 class Evaluator:
-    def __init__(self, model_path, tokenizer_dir, dev_path, batch_size=32):
-        self.tokenizer = PreTrainedTokenizerFast(
-            tokenizer_file=f"{tokenizer_dir}/tokenizer.json",
-            bos_token="<s>",
-            eos_token="</s>",
-            pad_token="<pad>",
-            unk_token="<unk>",
-        )
-
-        # Load model theo chuẩn HuggingFace
-        self.model = BartForConditionalGeneration.from_pretrained(model_path).to(DEVICE)
+    def __init__(self, model_path, dev_path, batch_size=32):
+        # Load tokenizer & model từ cùng thư mục (đã lưu cả hai khi train)
+        self.tokenizer = AutoTokenizer.from_pretrained(model_path)
+        self.model = AutoModelForSeq2SeqLM.from_pretrained(model_path).to(DEVICE)
         self.model.eval()
 
         self.dev_ds = NormDataset(dev_path, self.tokenizer)
@@ -65,36 +71,36 @@ class Evaluator:
         total_gt_chars = 0
         total_samples = 0
 
-        # Tạo bảng logging cho WandB
+        # WandB table
         table = None
         if wandb.run is not None:
             table = wandb.Table(columns=["Original", "Ground Truth", "Prediction", "Correct?"])
 
-        print("Starting Evaluation and Logging Inference...")
+        print("Starting Evaluation...")
 
         with torch.no_grad():
             for batch_idx, batch in enumerate(self.dev_dl):
                 src_ids = batch['input_ids'].to(DEVICE)
                 attn_mask = batch['attention_mask'].to(DEVICE)
 
-                # Dùng model.generate() thay vì tự viết greedy decode
                 generated_ids = self.model.generate(
                     input_ids=src_ids,
                     attention_mask=attn_mask,
                     max_length=128,
-                    num_beams=2,               # Thay 1 bằng 5 để dùng Beam Search
-                    no_repeat_ngram_size=2,    # Tránh vòng lặp n-gram (bị ngáo)
+                    num_beams=4,
                     early_stopping=True,
                 )
 
                 for idx in range(src_ids.size(0)):
                     dataset_idx = batch_idx * self.dev_dl.batch_size + idx
+                    if dataset_idx >= len(self.dev_ds):
+                        break
+
                     ex = self.dev_ds.data.iloc[dataset_idx]
 
                     original_text = str(ex['original']).strip()
                     ground_truth_text = str(ex['normalized']).strip()
 
-                    # Decode prediction — skip_special_tokens tự động bỏ <s>, </s>, <pad>
                     predict_text = self.tokenizer.decode(
                         generated_ids[idx], skip_special_tokens=True
                     ).strip()
@@ -103,16 +109,15 @@ class Evaluator:
                     if is_correct:
                         total_exact_match += 1
 
-                    # In ra vài mẫu đầu tiên để kiểm tra nhanh trên console
+                    # Console output cho vài mẫu đầu
                     if total_samples < 5:
                         print(f"\n--- Sample {total_samples} ---")
                         print(f"  Original : {original_text}")
                         print(f"  GT       : {ground_truth_text}")
-                        print(f"  Raw IDs  : {generated_ids[idx][:20].tolist()}...")
                         print(f"  Predict  : '{predict_text}'")
                         print(f"  Correct  : {is_correct}")
 
-                    # Log vào WandB Table
+                    # WandB table (giới hạn 200 dòng)
                     if table is not None and total_samples < 200:
                         table.add_data(original_text, ground_truth_text, predict_text,
                                        "✅" if is_correct else "❌")
@@ -128,7 +133,7 @@ class Evaluator:
                 if (batch_idx + 1) % 10 == 0:
                     print(f"Processed samples: {total_samples}")
 
-        # Tính toán kết quả cuối
+        # Kết quả
         em_rate = total_exact_match / total_samples
         cer = total_cer / max(1, total_gt_chars)
         wer = total_wer_model / max(1, total_gt_words)
@@ -149,16 +154,15 @@ class Evaluator:
 
 
 if __name__ == "__main__":
-    import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model_path", type=str, required=True)
-    parser.add_argument("--tokenizer_dir", type=str, required=True)
+    parser.add_argument("--model_path", type=str, required=True,
+                        help="Path to saved model directory (chứa cả tokenizer)")
     parser.add_argument("--dev_path", type=str, required=True)
     parser.add_argument("--batch_size", type=int, default=32)
-    parser.add_argument("--run_name", type=str, default="eval_inference_log")
+    parser.add_argument("--run_name", type=str, default="eval")
     args = parser.parse_args()
 
     wandb.init(project="lexnorm2", name=args.run_name, job_type="evaluation")
-    evaluator = Evaluator(args.model_path, args.tokenizer_dir, args.dev_path, args.batch_size)
+    evaluator = Evaluator(args.model_path, args.dev_path, args.batch_size)
     evaluator.evaluate()
     wandb.finish()

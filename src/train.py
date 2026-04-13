@@ -1,104 +1,192 @@
-import torch
-from torch.utils.data import DataLoader
-from transformers import PreTrainedTokenizerFast
+"""
+Fine-tuning T5 / ByT5 trên ViLexNorm.
+Sử dụng HuggingFace Seq2SeqTrainer.
 
-from build_dataset import NormDataset
-from model import create_model
-
-import wandb
-from wandb import Artifact
+Usage:
+    python src/train.py \
+        --model_name VietAI/vit5-base \
+        --run_name t5-vilexnorm \
+        --train_file data/ViLexNorm/data/train.csv \
+        --dev_file data/ViLexNorm/data/dev.csv \
+        --epochs 10 \
+        --batch_size 16
+"""
 
 import argparse
 from pathlib import Path
 
-DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+import numpy as np
+import torch
+from transformers import (
+    AutoModelForSeq2SeqLM,
+    AutoTokenizer,
+    Seq2SeqTrainer,
+    Seq2SeqTrainingArguments,
+    DataCollatorForSeq2Seq,
+)
+
+import wandb
+
+from build_dataset import NormDataset
 
 
-def run_train(tokenizer_dir, train_file, save_path, dev_path=None, epochs=5, batch_size=32):
-    tokenizer = PreTrainedTokenizerFast(
-        tokenizer_file=f"{tokenizer_dir}/tokenizer.json",
-        bos_token="<s>",
-        eos_token="</s>",
-        pad_token="<pad>",
-        unk_token="<unk>",
+def edit_distance(ref, hyp):
+    """Levenshtein edit distance giữa 2 list."""
+    n, m = len(ref), len(hyp)
+    dp = list(range(m + 1))
+    for i in range(1, n + 1):
+        prev, dp[0] = dp[0], i
+        for j in range(1, m + 1):
+            temp = dp[j]
+            if ref[i - 1] == hyp[j - 1]:
+                dp[j] = prev
+            else:
+                dp[j] = 1 + min(prev, dp[j], dp[j - 1])
+            prev = temp
+    return dp[m]
+
+
+def make_compute_metrics(tokenizer):
+    """Tạo hàm compute_metrics cho Seq2SeqTrainer."""
+
+    def compute_metrics(eval_preds):
+        preds, labels = eval_preds
+
+        # Decode predictions
+        if isinstance(preds, tuple):
+            preds = preds[0]
+
+        # Thay -100 bằng pad_token_id trước khi decode
+        preds = np.where(preds != -100, preds, tokenizer.pad_token_id)
+        labels = np.where(labels != -100, labels, tokenizer.pad_token_id)
+
+        decoded_preds = tokenizer.batch_decode(preds, skip_special_tokens=True)
+        decoded_labels = tokenizer.batch_decode(labels, skip_special_tokens=True)
+
+        # Strip whitespace
+        decoded_preds = [p.strip() for p in decoded_preds]
+        decoded_labels = [l.strip() for l in decoded_labels]
+
+        # Exact Match
+        total = len(decoded_preds)
+        exact_match = sum(p == l for p, l in zip(decoded_preds, decoded_labels))
+
+        # CER
+        total_cer = 0
+        total_chars = 0
+        for pred, label in zip(decoded_preds, decoded_labels):
+            total_cer += edit_distance(list(label), list(pred))
+            total_chars += len(list(label))
+
+        # WER
+        total_wer = 0
+        total_words = 0
+        for pred, label in zip(decoded_preds, decoded_labels):
+            total_wer += edit_distance(label.split(), pred.split())
+            total_words += len(label.split())
+
+        return {
+            "exact_match": exact_match / max(1, total) * 100,
+            "cer": total_cer / max(1, total_chars) * 100,
+            "wer": total_wer / max(1, total_words) * 100,
+        }
+
+    return compute_metrics
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Fine-tune T5/ByT5 trên ViLexNorm")
+    parser.add_argument("--model_name", type=str, required=True,
+                        help="HuggingFace model ID, vd: VietAI/vit5-base hoặc google/byt5-small")
+    parser.add_argument("--run_name", type=str, required=True,
+                        help="Tên run trên WandB và thư mục output")
+    parser.add_argument("--train_file", type=str, required=True)
+    parser.add_argument("--dev_file", type=str, default=None)
+    parser.add_argument("--epochs", type=int, default=10)
+    parser.add_argument("--batch_size", type=int, default=16)
+    parser.add_argument("--lr", type=float, default=3e-4)
+    parser.add_argument("--max_src_len", type=int, default=128)
+    parser.add_argument("--max_tgt_len", type=int, default=128)
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
+    parser.add_argument("--fp16", action="store_true", default=False)
+    parser.add_argument("--output_dir", type=str, default="outputs")
+    args = parser.parse_args()
+
+    # ────── Setup ──────
+    save_dir = Path(args.output_dir) / args.run_name
+
+    wandb.init(project="lexnorm2", name=args.run_name)
+
+    # ────── Load tokenizer & model ──────
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name)
+    model = AutoModelForSeq2SeqLM.from_pretrained(args.model_name)
+
+    print(f"Model: {args.model_name}")
+    print(f"Parameters: {sum(p.numel() for p in model.parameters()):,}")
+
+    # ────── Datasets ──────
+    train_ds = NormDataset(args.train_file, tokenizer,
+                           max_src_len=args.max_src_len,
+                           max_tgt_len=args.max_tgt_len)
+    dev_ds = None
+    if args.dev_file:
+        dev_ds = NormDataset(args.dev_file, tokenizer,
+                             max_src_len=args.max_src_len,
+                             max_tgt_len=args.max_tgt_len)
+
+    # ────── Data collator ──────
+    data_collator = DataCollatorForSeq2Seq(
+        tokenizer=tokenizer,
+        model=model,
+        padding=True,
+        label_pad_token_id=-100,
     )
 
-    train_ds = NormDataset(train_file, tokenizer)
-    train_dl = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
+    # ────── Training arguments ──────
+    training_args = Seq2SeqTrainingArguments(
+        output_dir=str(save_dir),
+        num_train_epochs=args.epochs,
+        per_device_train_batch_size=args.batch_size,
+        per_device_eval_batch_size=args.batch_size,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
+        learning_rate=args.lr,
+        weight_decay=0.01,
+        warmup_ratio=0.1,
+        fp16=args.fp16,
+        logging_steps=50,
+        save_strategy="epoch",
+        eval_strategy="epoch" if dev_ds else "no",
+        predict_with_generate=True,
+        generation_max_length=args.max_tgt_len,
+        report_to="wandb",
+        load_best_model_at_end=True if dev_ds else False,
+        metric_for_best_model="cer" if dev_ds else None,
+        greater_is_better=False if dev_ds else None,
+        save_total_limit=2,
+        dataloader_num_workers=2,
+    )
 
-    if dev_path:
-        dev_ds = NormDataset(dev_path, tokenizer)
-        dev_dl = DataLoader(dev_ds, batch_size=batch_size, shuffle=False)
+    # ────── Trainer ──────
+    trainer = Seq2SeqTrainer(
+        model=model,
+        args=training_args,
+        train_dataset=train_ds,
+        eval_dataset=dev_ds,
+        tokenizer=tokenizer,
+        data_collator=data_collator,
+        compute_metrics=make_compute_metrics(tokenizer),
+    )
 
-    model = create_model(
-        vocab_size=tokenizer.vocab_size,
-        pad_token_id=tokenizer.pad_token_id,
-        bos_token_id=tokenizer.bos_token_id,
-        eos_token_id=tokenizer.eos_token_id,
-    ).to(DEVICE)
+    # ────── Train ──────
+    trainer.train()
 
-    opt = torch.optim.AdamW(model.parameters(), lr=1e-4)
+    # ────── Save best model ──────
+    trainer.save_model(str(save_dir / "best"))
+    tokenizer.save_pretrained(str(save_dir / "best"))
 
-    model.train()
-    for epoch in range(epochs):
-        total_train_loss = 0
-        num_batches = 0
-        for batch in train_dl:
-            src_ids = batch['input_ids'].to(DEVICE)
-            attn_mask = batch['attention_mask'].to(DEVICE)
-            labels = batch['labels'].to(DEVICE)
-
-            # BART tự động xử lý shift_right và tạo decoder_input_ids từ labels
-            outputs = model(input_ids=src_ids, attention_mask=attn_mask, labels=labels)
-            loss = outputs.loss
-
-            opt.zero_grad()
-            loss.backward()
-            opt.step()
-
-            total_train_loss += loss.item()
-            num_batches += 1
-
-        avg_train_loss = total_train_loss / num_batches
-        print(f"Epoch {epoch+1}/{epochs}, Train Loss: {avg_train_loss:.4f}")
-        wandb.log({"train_loss": avg_train_loss})
-
-        if dev_path:
-            model.eval()
-            with torch.no_grad():
-                dev_loss = 0
-                for batch in dev_dl:
-                    src_ids = batch['input_ids'].to(DEVICE)
-                    attn_mask = batch['attention_mask'].to(DEVICE)
-                    labels = batch['labels'].to(DEVICE)
-
-                    outputs = model(input_ids=src_ids, attention_mask=attn_mask, labels=labels)
-                    dev_loss += outputs.loss.item()
-                dev_loss /= len(dev_dl)
-                print(f"Epoch {epoch+1}/{epochs}, Dev Loss: {dev_loss:.4f}")
-                wandb.log({"dev_loss": dev_loss})
-            model.train()
-
-    # Lưu model theo chuẩn HuggingFace (config.json + model.safetensors)
-    model.save_pretrained(save_path)
-    tokenizer.save_pretrained(save_path)
-
-    artifact = Artifact("model", type="model")
-    artifact.add_dir(str(save_path))
-    wandb.log_artifact(artifact)
+    print(f"\nModel saved to {save_dir / 'best'}")
     wandb.finish()
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--run_name", type=str, required=True)
-    parser.add_argument("--tokenizer_dir", type=str, required=True)
-    parser.add_argument("--train_file", type=str, required=True)
-    parser.add_argument("--dev_path", type=str, default=None)
-    parser.add_argument("--epochs", type=int, default=5)
-    parser.add_argument("--batch_size", type=int, default=32)
-    args = parser.parse_args()
-    wandb.init(project="lexnorm2", name=args.run_name)
-    save_path = Path("models") / args.run_name
-    save_path.mkdir(exist_ok=True, parents=True)
-    run_train(args.tokenizer_dir, args.train_file, save_path, args.dev_path, args.epochs, args.batch_size)
+    main()

@@ -1,3 +1,7 @@
-tokenizers
 transformers
 sentencepiece
+datasets
+wandb
+torch
+accelerate
+pandas
