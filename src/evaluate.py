@@ -55,7 +55,7 @@ def calculate_cer(ref, hyp):
 class Evaluator:
     def __init__(self, model_path, dev_path, batch_size=32):
         # Load tokenizer & model từ cùng thư mục (đã lưu cả hai khi train)
-        self.tokenizer = AutoTokenizer.from_pretrained(model_path)
+        self.tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=False)
         self.model = AutoModelForSeq2SeqLM.from_pretrained(model_path).to(DEVICE)
         self.model.eval()
 

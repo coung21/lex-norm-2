@@ -118,7 +118,7 @@ def main():
     wandb.init(project="lexnorm2", name=args.run_name)
 
     # ────── Load tokenizer & model ──────
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name)
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name, use_fast=False)
     model = AutoModelForSeq2SeqLM.from_pretrained(args.model_name)
 
     print(f"Model: {args.model_name}")
