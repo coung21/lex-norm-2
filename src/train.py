@@ -14,21 +14,48 @@ Usage:
 
 import argparse
 from pathlib import Path
+import tempfile
+import os
 
 import numpy as np
 import torch
 from transformers import (
     AutoModelForSeq2SeqLM,
     AutoTokenizer,
+    T5Tokenizer,
     Seq2SeqTrainer,
     Seq2SeqTrainingArguments,
     DataCollatorForSeq2Seq,
 )
+from huggingface_hub import hf_hub_download
 
 import wandb
 
 from build_dataset import NormDataset
 
+
+def load_tokenizer(model_name):
+    """Load tokenizer, bypassing tokenizer.json to avoid convert_to_native_format bug."""
+    try:
+        return AutoTokenizer.from_pretrained(model_name)
+    except (KeyError, Exception):
+        pass
+
+    # Fallback: download chỉ spiece.model + config, bỏ qua tokenizer.json
+    print(f"[WARN] AutoTokenizer failed, falling back to manual T5Tokenizer load...")
+    tmp_dir = tempfile.mkdtemp()
+    for fname in ["spiece.model", "tokenizer_config.json", "special_tokens_map.json"]:
+        try:
+            hf_hub_download(repo_id=model_name, filename=fname, local_dir=tmp_dir)
+        except Exception:
+            pass
+
+    # Xoá tokenizer.json nếu bị cache lại
+    tj = os.path.join(tmp_dir, "tokenizer.json")
+    if os.path.exists(tj):
+        os.remove(tj)
+
+    return T5Tokenizer.from_pretrained(tmp_dir)
 
 def edit_distance(ref, hyp):
     """Levenshtein edit distance giữa 2 list."""
@@ -118,11 +145,7 @@ def main():
     wandb.init(project="lexnorm2", name=args.run_name)
 
     # ────── Load tokenizer & model ──────
-    if "vit5" in args.model_name.lower():
-        from transformers import T5Tokenizer
-        tokenizer = T5Tokenizer.from_pretrained(args.model_name)
-    else:
-        tokenizer = AutoTokenizer.from_pretrained(args.model_name, use_fast=False)
+    tokenizer = load_tokenizer(args.model_name)
     model = AutoModelForSeq2SeqLM.from_pretrained(args.model_name)
 
     print(f"Model: {args.model_name}")

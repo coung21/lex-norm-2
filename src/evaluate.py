@@ -15,17 +15,44 @@ Usage:
 """
 
 import argparse
+import tempfile
+import os
 
 import torch
 import pandas as pd
-from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
+from transformers import AutoModelForSeq2SeqLM, AutoTokenizer, T5Tokenizer
 from torch.utils.data import DataLoader
+from huggingface_hub import hf_hub_download
 
 import wandb
 
 from build_dataset import NormDataset
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+
+def load_tokenizer(model_path):
+    """Load tokenizer, bypassing tokenizer.json to avoid convert_to_native_format bug."""
+    try:
+        return AutoTokenizer.from_pretrained(model_path)
+    except (KeyError, Exception):
+        pass
+
+    print(f"[WARN] AutoTokenizer failed, falling back to manual T5Tokenizer load...")
+    # Nếu model_path là local dir (đã save từ train), xoá tokenizer.json
+    tj = os.path.join(model_path, "tokenizer.json")
+    if os.path.exists(tj):
+        os.remove(tj)
+        return T5Tokenizer.from_pretrained(model_path)
+
+    # Nếu model_path là HuggingFace repo
+    tmp_dir = tempfile.mkdtemp()
+    for fname in ["spiece.model", "tokenizer_config.json", "special_tokens_map.json"]:
+        try:
+            hf_hub_download(repo_id=model_path, filename=fname, local_dir=tmp_dir)
+        except Exception:
+            pass
+    return T5Tokenizer.from_pretrained(tmp_dir)
 
 
 def edit_distance(ref, hyp):
@@ -54,12 +81,8 @@ def calculate_cer(ref, hyp):
 
 class Evaluator:
     def __init__(self, model_path, dev_path, batch_size=32):
-        # Load tokenizer & model từ cùng thư mục (đã lưu cả hai khi train)
-        if "vit5" in model_path.lower():
-            from transformers import T5Tokenizer
-            self.tokenizer = T5Tokenizer.from_pretrained(model_path)
-        else:
-            self.tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=False)
+        # Load tokenizer & model từ cùng thư mục
+        self.tokenizer = load_tokenizer(model_path)
         self.model = AutoModelForSeq2SeqLM.from_pretrained(model_path).to(DEVICE)
         self.model.eval()
 
