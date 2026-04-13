@@ -58,6 +58,7 @@ def train_byte_bpe():
         vocab_size=VOCAB_SIZE,
         min_frequency=MIN_FREQ,
         special_tokens=SPECIAL_TOKENS,
+        initial_alphabet=ByteLevel.alphabet(),
         show_progress=True,
     )
 
