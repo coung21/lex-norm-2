@@ -1,6 +1,12 @@
 #!/bin/bash
 # ─────────────────────────────────────────────────────
-# Script chạy so sánh T5 vs ByT5 trên ViLexNorm (Kaggle)
+# Fair comparison: mT5-small vs ByT5-small trên ViLexNorm
+#
+# Cả hai model đều:
+#   - Từ Google
+#   - Pre-trained trên mC4 (multilingual)
+#   - ~300M parameters
+#   - Biến số duy nhất: Subword (SentencePiece) vs Byte-level
 # ─────────────────────────────────────────────────────
 
 set -e
@@ -12,38 +18,42 @@ DEV_FILE="data/ViLexNorm/data/dev.csv"
 TEST_FILE="data/ViLexNorm/data/test.csv"
 
 EPOCHS=10
-BATCH_SIZE=16
+LR=3e-4
 
 # ═══════════════════════════════════════════════
-# 1. ViT5-base
+# 1. mT5-small (Subword tokenizer — SentencePiece)
+#    ~300M params, max_len=128 (subword tokens ngắn)
 # ═══════════════════════════════════════════════
 echo "=============================="
-echo "  Training ViT5-base"
+echo "  Training mT5-small"
 echo "=============================="
 
 python src/train.py \
-    --model_name VietAI/vit5-base \
-    --run_name vit5-base-vilexnorm \
+    --model_name google/mt5-small \
+    --run_name mt5-small-vilexnorm \
     --train_file "$TRAIN_FILE" \
     --dev_file "$DEV_FILE" \
     --epochs "$EPOCHS" \
-    --batch_size "$BATCH_SIZE" \
-    --lr 3e-4
+    --batch_size 16 \
+    --lr "$LR" \
+    --max_src_len 128 \
+    --max_tgt_len 128
 
-echo "--- Evaluating ViT5-base on dev set ---"
+echo "--- Evaluating mT5-small on dev set ---"
 python src/evaluate.py \
-    --model_path outputs/vit5-base-vilexnorm/best \
+    --model_path outputs/mt5-small-vilexnorm/best \
     --dev_path "$DEV_FILE" \
-    --run_name eval-vit5-base-dev
+    --run_name eval-mt5-small-dev
 
-echo "--- Evaluating ViT5-base on test set ---"
+echo "--- Evaluating mT5-small on test set ---"
 python src/evaluate.py \
-    --model_path outputs/vit5-base-vilexnorm/best \
+    --model_path outputs/mt5-small-vilexnorm/best \
     --dev_path "$TEST_FILE" \
-    --run_name eval-vit5-base-test
+    --run_name eval-mt5-small-test
 
 # ═══════════════════════════════════════════════
-# 2. ByT5-small
+# 2. ByT5-small (Byte-level — không dùng tokenizer)
+#    ~300M params, max_len=512 (byte sequences dài hơn)
 # ═══════════════════════════════════════════════
 echo "=============================="
 echo "  Training ByT5-small"
@@ -55,8 +65,11 @@ python src/train.py \
     --train_file "$TRAIN_FILE" \
     --dev_file "$DEV_FILE" \
     --epochs "$EPOCHS" \
-    --batch_size "$BATCH_SIZE" \
-    --lr 1e-4
+    --batch_size 8 \
+    --gradient_accumulation_steps 2 \
+    --lr "$LR" \
+    --max_src_len 512 \
+    --max_tgt_len 512
 
 echo "--- Evaluating ByT5-small on dev set ---"
 python src/evaluate.py \
