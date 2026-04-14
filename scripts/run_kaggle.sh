@@ -65,11 +65,12 @@ python src/train.py \
     --train_file "$TRAIN_FILE" \
     --dev_file "$DEV_FILE" \
     --epochs "$EPOCHS" \
-    --batch_size 8 \
-    --gradient_accumulation_steps 2 \
+    --batch_size 4 \
+    --gradient_accumulation_steps 4 \
     --lr "$LR" \
-    --max_src_len 512 \
-    --max_tgt_len 512
+    --max_src_len 256 \
+    --max_tgt_len 256 \
+    --fp16
 
 echo "--- Evaluating ByT5-small on dev set ---"
 python src/evaluate.py \
