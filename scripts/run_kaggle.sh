@@ -34,10 +34,12 @@ python src/train.py \
     --train_file "$TRAIN_FILE" \
     --dev_file "$DEV_FILE" \
     --epochs "$EPOCHS" \
-    --batch_size 16 \
+    --batch_size 4 \
+    --gradient_accumulation_steps 4 \
     --lr "$LR" \
     --max_src_len 128 \
-    --max_tgt_len 128
+    --max_tgt_len 128 \
+    --fp16
 
 echo "--- Evaluating mT5-small on dev set ---"
 python src/evaluate.py \
