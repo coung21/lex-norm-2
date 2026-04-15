@@ -1,218 +1,177 @@
 """
-Fine-tuning T5 / ByT5 trên ViLexNorm.
-Sử dụng HuggingFace Seq2SeqTrainer.
+Training entry point for MTL Vietnamese Lexical Normalization.
 
 Usage:
-    python src/train.py \
-        --model_name VietAI/vit5-base \
-        --run_name t5-vilexnorm \
-        --train_file data/ViLexNorm/data/train.csv \
-        --dev_file data/ViLexNorm/data/dev.csv \
-        --epochs 10 \
-        --batch_size 16
+    # Single-task detection
+    python src/train.py --mode detection_only --run_name st-detection
+
+    # Single-task normalization
+    python src/train.py --mode normalization_only --run_name st-normalization
+
+    # MTL equal weighting
+    python src/train.py --mode mtl --run_name mtl-equal
+
+    # MTL + PCGrad
+    python src/train.py --mode mtl --use_pcgrad --run_name mtl-pcgrad
 """
 
 import argparse
+from dataclasses import asdict
 from pathlib import Path
-import tempfile
-import os
-
-import numpy as np
-import torch
-from transformers import (
-    AutoModelForSeq2SeqLM,
-    AutoTokenizer,
-    T5Tokenizer,
-    Seq2SeqTrainer,
-    Seq2SeqTrainingArguments,
-    DataCollatorForSeq2Seq,
-)
-from huggingface_hub import hf_hub_download
 
 import wandb
+from transformers import AutoTokenizer
 
-from build_dataset import NormDataset
-
-
-def load_tokenizer(model_name):
-    """Load tokenizer, bypassing tokenizer.json to avoid convert_to_native_format bug."""
-    try:
-        return AutoTokenizer.from_pretrained(model_name)
-    except (KeyError, Exception):
-        pass
-
-    # Fallback: download chỉ spiece.model + config, bỏ qua tokenizer.json
-    print(f"[WARN] AutoTokenizer failed, falling back to manual T5Tokenizer load...")
-    tmp_dir = tempfile.mkdtemp()
-    for fname in ["spiece.model", "tokenizer_config.json", "special_tokens_map.json"]:
-        try:
-            hf_hub_download(repo_id=model_name, filename=fname, local_dir=tmp_dir)
-        except Exception:
-            pass
-
-    # Xoá tokenizer.json nếu bị cache lại
-    tj = os.path.join(tmp_dir, "tokenizer.json")
-    if os.path.exists(tj):
-        os.remove(tj)
-
-    return T5Tokenizer.from_pretrained(tmp_dir)
-
-def edit_distance(ref, hyp):
-    """Levenshtein edit distance giữa 2 list."""
-    n, m = len(ref), len(hyp)
-    dp = list(range(m + 1))
-    for i in range(1, n + 1):
-        prev, dp[0] = dp[0], i
-        for j in range(1, m + 1):
-            temp = dp[j]
-            if ref[i - 1] == hyp[j - 1]:
-                dp[j] = prev
-            else:
-                dp[j] = 1 + min(prev, dp[j], dp[j - 1])
-            prev = temp
-    return dp[m]
+from config import MTLConfig
+from dataset import MTLDataset
+from model import BARTphoMTL
+from trainer import MTLTrainer
+from utils import set_seed
 
 
-def make_compute_metrics(tokenizer):
-    """Tạo hàm compute_metrics cho Seq2SeqTrainer."""
+def parse_args() -> MTLConfig:
+    """Parse CLI arguments into MTLConfig."""
+    parser = argparse.ArgumentParser(
+        description="MTL BARTpho-syllable Lexical Normalization Training"
+    )
 
-    def compute_metrics(eval_preds):
-        preds, labels = eval_preds
+    # Model
+    parser.add_argument("--model_name", type=str, default="vinai/bartpho-syllable-base")
 
-        # Decode predictions
-        if isinstance(preds, tuple):
-            preds = preds[0]
+    # Task mode
+    parser.add_argument(
+        "--mode", type=str, default="mtl",
+        choices=["detection_only", "normalization_only", "mtl"],
+        help="Task mode: detection_only, normalization_only, or mtl"
+    )
+    parser.add_argument("--use_pcgrad", action="store_true", default=False,
+                        help="Enable PCGrad for MTL training")
 
-        # Thay -100 bằng pad_token_id trước khi decode
-        preds = np.where(preds != -100, preds, tokenizer.pad_token_id)
-        labels = np.where(labels != -100, labels, tokenizer.pad_token_id)
+    # Training
+    parser.add_argument("--epochs", type=int, default=15)
+    parser.add_argument("--batch_size", type=int, default=8)
+    parser.add_argument("--lr", type=float, default=3e-5)
+    parser.add_argument("--head_lr", type=float, default=1e-4)
+    parser.add_argument("--warmup_ratio", type=float, default=0.1)
+    parser.add_argument("--weight_decay", type=float, default=0.01)
+    parser.add_argument("--max_grad_norm", type=float, default=1.0)
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=4)
+    parser.add_argument("--fp16", action="store_true", default=True)
+    parser.add_argument("--no_fp16", action="store_true", default=False)
+    parser.add_argument("--seed", type=int, default=42)
 
-        decoded_preds = tokenizer.batch_decode(preds, skip_special_tokens=True)
-        decoded_labels = tokenizer.batch_decode(labels, skip_special_tokens=True)
+    # Data
+    parser.add_argument("--max_seq_len", type=int, default=128)
+    parser.add_argument("--num_workers", type=int, default=2)
 
-        # Strip whitespace
-        decoded_preds = [p.strip() for p in decoded_preds]
-        decoded_labels = [l.strip() for l in decoded_labels]
+    # Paths
+    parser.add_argument("--train_file", type=str, default="data/ViLexNorm/data/train.csv")
+    parser.add_argument("--dev_file", type=str, default="data/ViLexNorm/data/dev.csv")
+    parser.add_argument("--test_file", type=str, default="data/ViLexNorm/data/test.csv")
+    parser.add_argument("--output_dir", type=str, default="outputs")
 
-        # Exact Match
-        total = len(decoded_preds)
-        exact_match = sum(p == l for p, l in zip(decoded_preds, decoded_labels))
+    # Evaluation
+    parser.add_argument("--beam_size", type=int, default=4)
+    parser.add_argument("--generation_max_length", type=int, default=128)
 
-        # CER
-        total_cer = 0
-        total_chars = 0
-        for pred, label in zip(decoded_preds, decoded_labels):
-            total_cer += edit_distance(list(label), list(pred))
-            total_chars += len(list(label))
+    # Logging
+    parser.add_argument("--log_interval", type=int, default=50)
 
-        # WER
-        total_wer = 0
-        total_words = 0
-        for pred, label in zip(decoded_preds, decoded_labels):
-            total_wer += edit_distance(label.split(), pred.split())
-            total_words += len(label.split())
+    # WandB
+    parser.add_argument("--project", type=str, default="lexnorm2-mtl")
+    parser.add_argument("--run_name", type=str, required=True)
 
-        return {
-            "exact_match": exact_match / max(1, total) * 100,
-            "cer": total_cer / max(1, total_chars) * 100,
-            "wer": total_wer / max(1, total_words) * 100,
-        }
+    args = parser.parse_args()
 
-    return compute_metrics
+    # Handle --no_fp16 flag
+    if args.no_fp16:
+        args.fp16 = False
+
+    # Build config
+    config = MTLConfig(
+        model_name=args.model_name,
+        mode=args.mode,
+        use_pcgrad=args.use_pcgrad,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        lr=args.lr,
+        head_lr=args.head_lr,
+        warmup_ratio=args.warmup_ratio,
+        weight_decay=args.weight_decay,
+        max_grad_norm=args.max_grad_norm,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
+        fp16=args.fp16,
+        seed=args.seed,
+        max_seq_len=args.max_seq_len,
+        num_workers=args.num_workers,
+        train_file=args.train_file,
+        dev_file=args.dev_file,
+        test_file=args.test_file,
+        output_dir=args.output_dir,
+        beam_size=args.beam_size,
+        generation_max_length=args.generation_max_length,
+        log_interval=args.log_interval,
+        project=args.project,
+        run_name=args.run_name,
+    )
+
+    return config
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Fine-tune T5/ByT5 trên ViLexNorm")
-    parser.add_argument("--model_name", type=str, required=True,
-                        help="HuggingFace model ID, vd: VietAI/vit5-base hoặc google/byt5-small")
-    parser.add_argument("--run_name", type=str, required=True,
-                        help="Tên run trên WandB và thư mục output")
-    parser.add_argument("--train_file", type=str, required=True)
-    parser.add_argument("--dev_file", type=str, default=None)
-    parser.add_argument("--epochs", type=int, default=10)
-    parser.add_argument("--batch_size", type=int, default=16)
-    parser.add_argument("--lr", type=float, default=3e-4)
-    parser.add_argument("--max_src_len", type=int, default=128)
-    parser.add_argument("--max_tgt_len", type=int, default=128)
-    parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
-    parser.add_argument("--fp16", action="store_true", default=False)
-    parser.add_argument("--output_dir", type=str, default="outputs")
-    args = parser.parse_args()
+    config = parse_args()
 
-    # ────── Setup ──────
-    save_dir = Path(args.output_dir) / args.run_name
+    # ── Reproducibility ────────────────────────────────────────────
+    set_seed(config.seed)
 
-    wandb.init(project="lexnorm2", name=args.run_name)
-
-    # ────── Load tokenizer & model ──────
-    tokenizer = load_tokenizer(args.model_name)
-    model = AutoModelForSeq2SeqLM.from_pretrained(args.model_name)
-
-    print(f"Model: {args.model_name}")
-    print(f"Parameters: {sum(p.numel() for p in model.parameters()):,}")
-
-    # ────── Datasets ──────
-    train_ds = NormDataset(args.train_file, tokenizer,
-                           max_src_len=args.max_src_len,
-                           max_tgt_len=args.max_tgt_len)
-    dev_ds = None
-    if args.dev_file:
-        dev_ds = NormDataset(args.dev_file, tokenizer,
-                             max_src_len=args.max_src_len,
-                             max_tgt_len=args.max_tgt_len)
-
-    # ────── Data collator ──────
-    data_collator = DataCollatorForSeq2Seq(
-        tokenizer=tokenizer,
-        model=model,
-        padding=True,
-        label_pad_token_id=-100,
+    # ── WandB ──────────────────────────────────────────────────────
+    wandb.init(
+        project=config.project,
+        name=config.run_name,
+        config=asdict(config),
+        tags=[config.mode, "pcgrad" if config.use_pcgrad else "standard"],
     )
 
-    # ────── Training arguments ──────
-    training_args = Seq2SeqTrainingArguments(
-        output_dir=str(save_dir),
-        num_train_epochs=args.epochs,
-        per_device_train_batch_size=args.batch_size,
-        per_device_eval_batch_size=args.batch_size,
-        gradient_accumulation_steps=args.gradient_accumulation_steps,
-        learning_rate=args.lr,
-        weight_decay=0.01,
-        warmup_steps=200,
-        fp16=args.fp16,
-        logging_steps=50,
-        save_strategy="epoch",
-        eval_strategy="epoch" if dev_ds else "no",
-        predict_with_generate=True,
-        generation_max_length=args.max_tgt_len,
-        report_to="wandb",
-        load_best_model_at_end=True if dev_ds else False,
-        metric_for_best_model="cer" if dev_ds else None,
-        greater_is_better=False if dev_ds else None,
-        save_total_limit=2,
-        dataloader_num_workers=2,
-    )
+    # ── Tokenizer ──────────────────────────────────────────────────
+    print(f"\nLoading tokenizer: {config.model_name}")
+    tokenizer = AutoTokenizer.from_pretrained(config.model_name)
 
-    # ────── Trainer ──────
-    trainer = Seq2SeqTrainer(
-        model=model,
-        args=training_args,
-        train_dataset=train_ds,
-        eval_dataset=dev_ds,
-        processing_class=tokenizer,
-        data_collator=data_collator,
-        compute_metrics=make_compute_metrics(tokenizer),
-    )
+    # ── Model ──────────────────────────────────────────────────────
+    print(f"Loading model: {config.model_name} (mode={config.mode})")
+    model = BARTphoMTL(config.model_name, mode=config.mode)
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"  Total params: {total_params:,}")
+    print(f"  Trainable params: {trainable_params:,}")
 
-    # ────── Train ──────
+    # ── Datasets ───────────────────────────────────────────────────
+    print(f"\nLoading datasets...")
+    train_ds = MTLDataset(config.train_file, tokenizer, config.max_seq_len)
+    dev_ds = MTLDataset(config.dev_file, tokenizer, config.max_seq_len)
+    print(f"  Train: {len(train_ds)} samples")
+    print(f"  Dev:   {len(dev_ds)} samples")
+
+    # ── Print sample NSW labels ────────────────────────────────────
+    print("\n── Sample NSW labels ──")
+    for i in range(min(5, len(train_ds))):
+        ex = train_ds.data.iloc[i]
+        from dataset import create_nsw_labels
+        labels = create_nsw_labels(str(ex["original"]), str(ex["normalized"]))
+        orig_words = str(ex["original"]).split()
+        print(f"  Original:   {ex['original']}")
+        print(f"  Normalized: {ex['normalized']}")
+        print(f"  NSW labels: {list(zip(orig_words, labels))}")
+        print()
+
+    # ── Trainer ────────────────────────────────────────────────────
+    trainer = MTLTrainer(model, config, train_ds, dev_ds, tokenizer)
+
+    # ── Train ──────────────────────────────────────────────────────
     trainer.train()
 
-    # ────── Save best model ──────
-    trainer.save_model(str(save_dir / "best"))
-    tokenizer.save_pretrained(str(save_dir / "best"))
-
-    print(f"\nModel saved to {save_dir / 'best'}")
+    # ── Finish ─────────────────────────────────────────────────────
     wandb.finish()
+    print("Done!")
 
 
 if __name__ == "__main__":

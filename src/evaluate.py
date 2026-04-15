@@ -1,195 +1,204 @@
 """
-Evaluation cho T5 / ByT5 trên ViLexNorm.
+Evaluation entry point for MTL Vietnamese Lexical Normalization.
+
+Evaluates a saved model on test/dev set and logs results to WandB.
 
 Metrics:
-- Exact Match (EM)
-- Character Error Rate (CER)
-- Word Error Rate (WER)
-- Error Reduction Rate (ERR)
+  - NSW Detection: Precision / Recall / F1
+  - Normalization: ERR / Word Accuracy / BLEU-4 / Exact Match
 
 Usage:
     python src/evaluate.py \
-        --model_path outputs/t5-vilexnorm/best \
-        --dev_path data/ViLexNorm/data/dev.csv \
-        --run_name eval-t5-vilexnorm
+        --model_path outputs/mtl-pcgrad/best \
+        --test_file data/ViLexNorm/data/test.csv \
+        --mode mtl \
+        --run_name eval-mtl-pcgrad
 """
 
 import argparse
-import tempfile
-import os
 
 import torch
-import pandas as pd
-from transformers import AutoModelForSeq2SeqLM, AutoTokenizer, T5Tokenizer
 from torch.utils.data import DataLoader
-from huggingface_hub import hf_hub_download
+from transformers import AutoTokenizer
 
 import wandb
 
-from build_dataset import NormDataset
+from model import BARTphoMTL
+from dataset import MTLDataset
+from metrics import compute_detection_metrics, compute_normalization_metrics
+from utils import load_checkpoint
 
-DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-
-def load_tokenizer(model_path):
-    """Load tokenizer, bypassing tokenizer.json to avoid convert_to_native_format bug."""
-    try:
-        return AutoTokenizer.from_pretrained(model_path)
-    except (KeyError, Exception):
-        pass
-
-    print(f"[WARN] AutoTokenizer failed, falling back to manual T5Tokenizer load...")
-    # Nếu model_path là local dir (đã save từ train), xoá tokenizer.json
-    tj = os.path.join(model_path, "tokenizer.json")
-    if os.path.exists(tj):
-        os.remove(tj)
-        return T5Tokenizer.from_pretrained(model_path)
-
-    # Nếu model_path là HuggingFace repo
-    tmp_dir = tempfile.mkdtemp()
-    for fname in ["spiece.model", "tokenizer_config.json", "special_tokens_map.json"]:
-        try:
-            hf_hub_download(repo_id=model_path, filename=fname, local_dir=tmp_dir)
-        except Exception:
-            pass
-    return T5Tokenizer.from_pretrained(tmp_dir)
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def edit_distance(ref, hyp):
-    """Levenshtein edit distance giữa 2 chuỗi/list."""
-    n, m = len(ref), len(hyp)
-    dp = list(range(m + 1))
-    for i in range(1, n + 1):
-        prev, dp[0] = dp[0], i
-        for j in range(1, m + 1):
-            temp = dp[j]
-            if ref[i - 1] == hyp[j - 1]:
-                dp[j] = prev
-            else:
-                dp[j] = 1 + min(prev, dp[j], dp[j - 1])
-            prev = temp
-    return dp[m]
+def main():
+    parser = argparse.ArgumentParser(description="Evaluate MTL Model")
+    parser.add_argument("--model_path", type=str, required=True,
+                        help="Path to saved checkpoint directory")
+    parser.add_argument("--test_file", type=str, required=True,
+                        help="Path to test/dev CSV file")
+    parser.add_argument("--mode", type=str, default="mtl",
+                        choices=["detection_only", "normalization_only", "mtl"])
+    parser.add_argument("--batch_size", type=int, default=32)
+    parser.add_argument("--beam_size", type=int, default=4)
+    parser.add_argument("--max_seq_len", type=int, default=128)
+    parser.add_argument("--run_name", type=str, default="eval")
+    parser.add_argument("--project", type=str, default="lexnorm2-mtl")
+    args = parser.parse_args()
 
+    # ── WandB ──────────────────────────────────────────────────────
+    wandb.init(
+        project=args.project,
+        name=args.run_name,
+        job_type="evaluation",
+        config=vars(args),
+    )
 
-def calculate_wer(ref, hyp):
-    return edit_distance(ref.split(), hyp.split())
+    # ── Load tokenizer & model ─────────────────────────────────────
+    bartpho_path = f"{args.model_path}/bartpho"
+    print(f"Loading tokenizer from: {bartpho_path}")
+    tokenizer = AutoTokenizer.from_pretrained(bartpho_path)
 
+    print(f"Loading model (mode={args.mode})...")
+    model = BARTphoMTL(bartpho_path, mode=args.mode)
 
-def calculate_cer(ref, hyp):
-    return edit_distance(list(ref), list(hyp))
+    # Load full checkpoint (includes detection head weights)
+    ckpt = load_checkpoint(args.model_path, model)
+    print(f"  Loaded checkpoint from epoch {ckpt.get('epoch', '?')}")
+    print(f"  Previous metrics: {ckpt.get('metrics', {})}")
 
+    model = model.to(DEVICE)
+    model.eval()
 
-class Evaluator:
-    def __init__(self, model_path, dev_path, batch_size=32):
-        # Load tokenizer & model từ cùng thư mục
-        self.tokenizer = load_tokenizer(model_path)
-        self.model = AutoModelForSeq2SeqLM.from_pretrained(model_path).to(DEVICE)
-        self.model.eval()
+    # ── Dataset ────────────────────────────────────────────────────
+    test_ds = MTLDataset(args.test_file, tokenizer, args.max_seq_len)
+    test_loader = DataLoader(
+        test_ds, batch_size=args.batch_size, shuffle=False, num_workers=2
+    )
+    print(f"Test set: {len(test_ds)} samples")
 
-        self.dev_ds = NormDataset(dev_path, self.tokenizer)
-        self.dev_dl = DataLoader(self.dev_ds, batch_size=batch_size, shuffle=False)
+    # ── Evaluation ─────────────────────────────────────────────────
+    all_det_preds = []
+    all_det_labels = []
+    all_pred_texts = []
+    all_ref_texts = []
+    all_orig_texts = []
 
-    def evaluate(self):
-        total_exact_match = 0
-        total_cer = 0
-        total_wer_model = 0
-        total_wer_baseline = 0
-        total_gt_words = 0
-        total_gt_chars = 0
-        total_samples = 0
+    # WandB prediction table
+    table = wandb.Table(
+        columns=["Original", "Ground Truth", "Prediction", "NSW Detected", "Correct?"]
+    )
 
-        # WandB table
-        table = None
-        if wandb.run is not None:
-            table = wandb.Table(columns=["Original", "Ground Truth", "Prediction", "Correct?"])
+    print("\nStarting Evaluation...")
 
-        print("Starting Evaluation...")
+    with torch.no_grad():
+        for batch_idx, batch in enumerate(test_loader):
+            batch_device = {k: v.to(DEVICE) for k, v in batch.items()}
 
-        with torch.no_grad():
-            for batch_idx, batch in enumerate(self.dev_dl):
-                src_ids = batch['input_ids'].to(DEVICE)
-                attn_mask = batch['attention_mask'].to(DEVICE)
+            # ── Detection ──────────────────────────────────────────
+            if args.mode in ("detection_only", "mtl"):
+                det_preds = model.predict_detection(
+                    batch_device["input_ids"],
+                    batch_device["attention_mask"],
+                )
+                det_labels = batch["detection_labels"]
+                for i in range(det_preds.size(0)):
+                    mask = det_labels[i] != -100
+                    all_det_preds.extend(det_preds[i][mask].cpu().tolist())
+                    all_det_labels.extend(det_labels[i][mask].cpu().tolist())
 
-                generated_ids = self.model.generate(
-                    input_ids=src_ids,
-                    attention_mask=attn_mask,
-                    max_length=128,
-                    num_beams=4,
+            # ── Normalization ──────────────────────────────────────
+            if args.mode in ("normalization_only", "mtl"):
+                generated_ids = model.generate(
+                    input_ids=batch_device["input_ids"],
+                    attention_mask=batch_device["attention_mask"],
+                    max_length=args.max_seq_len,
+                    num_beams=args.beam_size,
                     early_stopping=True,
                 )
 
-                for idx in range(src_ids.size(0)):
-                    dataset_idx = batch_idx * self.dev_dl.batch_size + idx
-                    if dataset_idx >= len(self.dev_ds):
-                        break
+                pred_texts = tokenizer.batch_decode(
+                    generated_ids, skip_special_tokens=True
+                )
+                pred_texts = [t.strip() for t in pred_texts]
+                all_pred_texts.extend(pred_texts)
 
-                    ex = self.dev_ds.data.iloc[dataset_idx]
+                ref_ids = batch["labels"].clone()
+                ref_ids[ref_ids == -100] = tokenizer.pad_token_id
+                ref_texts = tokenizer.batch_decode(ref_ids, skip_special_tokens=True)
+                ref_texts = [t.strip() for t in ref_texts]
+                all_ref_texts.extend(ref_texts)
 
-                    original_text = str(ex['original']).strip()
-                    ground_truth_text = str(ex['normalized']).strip()
+                orig_texts = tokenizer.batch_decode(
+                    batch["input_ids"], skip_special_tokens=True
+                )
+                orig_texts = [t.strip() for t in orig_texts]
+                all_orig_texts.extend(orig_texts)
 
-                    predict_text = self.tokenizer.decode(
-                        generated_ids[idx], skip_special_tokens=True
-                    ).strip()
+                # Table rows (limit to 300)
+                for i, (o, r, p) in enumerate(zip(orig_texts, ref_texts, pred_texts)):
+                    if len(table.data) < 300:
+                        is_correct = p == r
+                        nsw_count = "N/A"
+                        if args.mode == "mtl" and batch_idx * args.batch_size + i < len(all_det_preds):
+                            # Count NSW detections for this sample
+                            nsw_count = str(sum(
+                                1 for l in batch["detection_labels"][i].tolist() if l == 1
+                            ))
+                        table.add_data(o, r, p, nsw_count, "✅" if is_correct else "❌")
 
-                    is_correct = (predict_text == ground_truth_text)
-                    if is_correct:
-                        total_exact_match += 1
+            if (batch_idx + 1) % 10 == 0:
+                print(f"  Processed {(batch_idx + 1) * args.batch_size} samples...")
 
-                    # Console output cho vài mẫu đầu
-                    if total_samples < 5:
-                        print(f"\n--- Sample {total_samples} ---")
-                        print(f"  Original : {original_text}")
-                        print(f"  GT       : {ground_truth_text}")
-                        print(f"  Predict  : '{predict_text}'")
-                        print(f"  Correct  : {is_correct}")
+    # ── Compute & log metrics ──────────────────────────────────────
+    metrics = {}
 
-                    # WandB table (giới hạn 200 dòng)
-                    if table is not None and total_samples < 200:
-                        table.add_data(original_text, ground_truth_text, predict_text,
-                                       "✅" if is_correct else "❌")
+    if args.mode in ("detection_only", "mtl") and all_det_labels:
+        det_metrics = compute_detection_metrics(all_det_preds, all_det_labels)
+        metrics.update(det_metrics)
 
-                    total_wer_baseline += calculate_wer(ground_truth_text, original_text)
-                    total_wer_model += calculate_wer(ground_truth_text, predict_text)
-                    total_cer += calculate_cer(ground_truth_text, predict_text)
+    if args.mode in ("normalization_only", "mtl") and all_ref_texts:
+        norm_metrics = compute_normalization_metrics(
+            all_pred_texts, all_ref_texts, all_orig_texts
+        )
+        metrics.update(norm_metrics)
 
-                    total_gt_words += len(ground_truth_text.split())
-                    total_gt_chars += len(list(ground_truth_text))
-                    total_samples += 1
+    # Print results
+    print(f"\n{'='*50}")
+    print(f"EVALUATION RESULTS ({len(test_ds)} samples)")
+    print(f"{'='*50}")
 
-                if (batch_idx + 1) % 10 == 0:
-                    print(f"Processed samples: {total_samples}")
+    if args.mode in ("detection_only", "mtl"):
+        print(f"\nNSW Detection:")
+        print(f"  Precision: {metrics.get('det_precision', 0):.2f}%")
+        print(f"  Recall:    {metrics.get('det_recall', 0):.2f}%")
+        print(f"  F1:        {metrics.get('det_f1', 0):.2f}%")
 
-        # Kết quả
-        em_rate = total_exact_match / total_samples
-        cer = total_cer / max(1, total_gt_chars)
-        wer = total_wer_model / max(1, total_gt_words)
-        err = (total_wer_baseline - total_wer_model) / total_wer_baseline if total_wer_baseline > 0 else 0.0
+    if args.mode in ("normalization_only", "mtl"):
+        print(f"\nNormalization:")
+        print(f"  ERR:          {metrics.get('norm_err', 0):.2f}%")
+        print(f"  Word Accuracy: {metrics.get('norm_word_acc', 0):.2f}%")
+        print(f"  BLEU-4:       {metrics.get('norm_bleu4', 0):.2f}")
+        print(f"  Exact Match:  {metrics.get('norm_exact_match', 0):.2f}%")
 
-        print("=" * 40)
-        print(f"EVALUATION RESULTS ({total_samples} samples)")
-        print(f"EM: {em_rate*100:.2f}% | WER: {wer*100:.2f}% | CER: {cer*100:.2f}% | ERR: {err*100:.2f}%")
+    # Print some sample predictions
+    if all_pred_texts:
+        print(f"\n── Sample Predictions ──")
+        for i in range(min(5, len(all_pred_texts))):
+            correct = "✅" if all_pred_texts[i] == all_ref_texts[i] else "❌"
+            print(f"  [{correct}] Original:   {all_orig_texts[i]}")
+            print(f"       GT:         {all_ref_texts[i]}")
+            print(f"       Prediction: {all_pred_texts[i]}")
+            print()
 
-        if wandb.run is not None:
-            wandb.log({
-                "eval/exact_match": em_rate * 100,
-                "eval/wer": wer * 100,
-                "eval/cer": cer * 100,
-                "eval/err": err * 100,
-                "eval/predictions": table,
-            })
+    # Log to WandB
+    wandb.log({f"test/{k}": v for k, v in metrics.items()})
+    if len(table.data) > 0:
+        wandb.log({"test/predictions": table})
+
+    wandb.finish()
+    print("Evaluation complete!")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--model_path", type=str, required=True,
-                        help="Path to saved model directory (chứa cả tokenizer)")
-    parser.add_argument("--dev_path", type=str, required=True)
-    parser.add_argument("--batch_size", type=int, default=32)
-    parser.add_argument("--run_name", type=str, default="eval")
-    args = parser.parse_args()
-
-    wandb.init(project="lexnorm2", name=args.run_name, job_type="evaluation")
-    evaluator = Evaluator(args.model_path, args.dev_path, args.batch_size)
-    evaluator.evaluate()
-    wandb.finish()
+    main()
