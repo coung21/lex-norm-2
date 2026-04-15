@@ -50,7 +50,7 @@ class NormDataset(Dataset):
         ]
 
         return {
-            'input_ids': torch.tensor(src_enc['input_ids'], dtype=torch.long),
-            'attention_mask': torch.tensor(src_enc['attention_mask'], dtype=torch.long),
-            'labels': torch.tensor(labels, dtype=torch.long),
+            'input_ids': src_enc['input_ids'],
+            'attention_mask': src_enc['attention_mask'],
+            'labels': labels,
         }
