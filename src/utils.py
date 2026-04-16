@@ -67,7 +67,7 @@ def get_optimizer(
 
         is_no_decay = any(nd in n for nd in no_decay)
 
-        if "detection_head" in n:
+        if "detection_head" in n or "log_var" in n:
             if is_no_decay:
                 head_params_no_decay.append(p)
             else:

@@ -17,6 +17,7 @@ class MTLConfig:
     # "detection_only", "normalization_only", "mtl"
     mode: str = "mtl"
     use_pcgrad: bool = False
+    use_uncertainty: bool = False
 
     # ── Training ───────────────────────────────────────
     epochs: int = 15

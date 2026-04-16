@@ -42,6 +42,10 @@ class BARTphoMTL(nn.Module):
         # Initialize detection head weights
         self._init_detection_head()
 
+        # Learnable log variances for Uncertainty Weighting
+        self.log_var_det = nn.Parameter(torch.zeros(1))
+        self.log_var_norm = nn.Parameter(torch.zeros(1))
+
     def _init_detection_head(self):
         """Xavier initialization for detection head."""
         for module in self.detection_head:

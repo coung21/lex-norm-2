@@ -255,14 +255,20 @@ class MTLTrainer:
             # Log step metrics
             if self.global_step % self.config.log_interval == 0:
                 lr = self.scheduler.get_last_lr()[0]
-                wandb.log({
+                log_dict = {
                     "train/loss_det": det_loss_val,
                     "train/loss_norm": norm_loss_val,
                     "train/loss_total": total_loss_val,
                     "train/lr": lr,
                     "train/step": self.global_step,
                     "train/epoch": epoch,
-                })
+                }
+                
+                if self.config.use_uncertainty:
+                    log_dict["train/uncertainty_det"] = self.model.log_var_det.item()
+                    log_dict["train/uncertainty_norm"] = self.model.log_var_norm.item()
+                    
+                wandb.log(log_dict)
 
                 if (step + 1) % (self.config.log_interval * 5) == 0:
                     print(
@@ -294,10 +300,17 @@ class MTLTrainer:
         norm_loss = outputs.get("norm_loss", None)
 
         total_loss = torch.tensor(0.0, device=DEVICE)
-        if det_loss is not None:
-            total_loss = total_loss + det_loss
-        if norm_loss is not None:
-            total_loss = total_loss + norm_loss
+        
+        if getattr(self.config, "use_uncertainty", False) and self.config.mode == "mtl":
+            if det_loss is not None:
+                total_loss = total_loss + 0.5 * torch.exp(-self.model.log_var_det) * det_loss + 0.5 * self.model.log_var_det
+            if norm_loss is not None:
+                total_loss = total_loss + 0.5 * torch.exp(-self.model.log_var_norm) * norm_loss + 0.5 * self.model.log_var_norm
+        else:
+            if det_loss is not None:
+                total_loss = total_loss + det_loss
+            if norm_loss is not None:
+                total_loss = total_loss + norm_loss
 
         # Scale for gradient accumulation
         scaled_loss = total_loss / accum

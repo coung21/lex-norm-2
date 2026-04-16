@@ -46,6 +46,8 @@ def parse_args() -> MTLConfig:
     )
     parser.add_argument("--use_pcgrad", action="store_true", default=False,
                         help="Enable PCGrad for MTL training")
+    parser.add_argument("--use_uncertainty", action="store_true", default=False,
+                        help="Enable Uncertainty Weighting for MTL training")
 
     # Training
     parser.add_argument("--epochs", type=int, default=15)
@@ -92,6 +94,7 @@ def parse_args() -> MTLConfig:
         model_name=args.model_name,
         mode=args.mode,
         use_pcgrad=args.use_pcgrad,
+        use_uncertainty=args.use_uncertainty,
         epochs=args.epochs,
         batch_size=args.batch_size,
         lr=args.lr,
