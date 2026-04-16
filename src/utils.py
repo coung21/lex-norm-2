@@ -42,68 +42,54 @@ def get_optimizer(
 
     - Shared encoder params: encoder_lr
     - Detection head params: head_lr
-    - Decoder + LM head params: encoder_lr (same as encoder for seq2seq fine-tuning)
+    - Decoder + LM head params: encoder_lr
 
     No weight decay on bias and LayerNorm parameters.
     """
     no_decay = {"bias", "LayerNorm.weight", "layer_norm.weight"}
 
+    encoder_params_decay = []
+    encoder_params_no_decay = []
+    head_params_decay = []
+    head_params_no_decay = []
+    decoder_params_decay = []
+    decoder_params_no_decay = []
+
+    seen = set()
+
+    for n, p in model.named_parameters():
+        if not p.requires_grad:
+            continue
+            
+        if p in seen:
+            continue
+        seen.add(p)
+
+        is_no_decay = any(nd in n for nd in no_decay)
+
+        if "detection_head" in n:
+            if is_no_decay:
+                head_params_no_decay.append(p)
+            else:
+                head_params_decay.append(p)
+        elif "encoder" in n or "shared" in n:
+            if is_no_decay:
+                encoder_params_no_decay.append(p)
+            else:
+                encoder_params_decay.append(p)
+        else: # decoder, lm_head, etc.
+            if is_no_decay:
+                decoder_params_no_decay.append(p)
+            else:
+                decoder_params_decay.append(p)
+
     param_groups = [
-        # Shared encoder — low LR
-        {
-            "params": [
-                p for n, p in model.encoder.named_parameters()
-                if not any(nd in n for nd in no_decay) and p.requires_grad
-            ],
-            "lr": encoder_lr,
-            "weight_decay": weight_decay,
-            "group_name": "encoder",
-        },
-        {
-            "params": [
-                p for n, p in model.encoder.named_parameters()
-                if any(nd in n for nd in no_decay) and p.requires_grad
-            ],
-            "lr": encoder_lr,
-            "weight_decay": 0.0,
-            "group_name": "encoder_no_decay",
-        },
-        # Detection head — high LR
-        {
-            "params": [
-                p for p in model.detection_head.parameters() if p.requires_grad
-            ],
-            "lr": head_lr,
-            "weight_decay": weight_decay,
-            "group_name": "detection_head",
-        },
-        # Decoder + LM head — same as encoder LR
-        {
-            "params": [
-                p for n, p in model.decoder.named_parameters()
-                if not any(nd in n for nd in no_decay) and p.requires_grad
-            ],
-            "lr": encoder_lr,
-            "weight_decay": weight_decay,
-            "group_name": "decoder",
-        },
-        {
-            "params": [
-                p for n, p in model.decoder.named_parameters()
-                if any(nd in n for nd in no_decay) and p.requires_grad
-            ],
-            "lr": encoder_lr,
-            "weight_decay": 0.0,
-            "group_name": "decoder_no_decay",
-        },
-        {
-            "params": [
-                p for p in model.lm_head.parameters() if p.requires_grad
-            ],
-            "lr": encoder_lr,
-            "weight_decay": weight_decay,
-            "group_name": "lm_head",
-        },
+        {"params": encoder_params_decay, "lr": encoder_lr, "weight_decay": weight_decay, "group_name": "encoder"},
+        {"params": encoder_params_no_decay, "lr": encoder_lr, "weight_decay": 0.0, "group_name": "encoder_no_decay"},
+        {"params": head_params_decay, "lr": head_lr, "weight_decay": weight_decay, "group_name": "detection_head"},
+        {"params": head_params_no_decay, "lr": head_lr, "weight_decay": 0.0, "group_name": "detection_head_no_decay"},
+        {"params": decoder_params_decay, "lr": encoder_lr, "weight_decay": weight_decay, "group_name": "decoder"},
+        {"params": decoder_params_no_decay, "lr": encoder_lr, "weight_decay": 0.0, "group_name": "decoder_no_decay"},
     ]
 
     # Filter out empty param groups
