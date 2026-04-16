@@ -37,7 +37,7 @@ echo "========================================"
 echo "  [1/4] Single-Task: Detection Only"
 echo "========================================"
 
-python src/train.py \
+python3 src/train.py \
     --mode detection_only \
     --run_name st-detection \
     --train_file "$TRAIN_FILE" \
@@ -50,7 +50,7 @@ python src/train.py \
     --fp16
 
 echo "--- Evaluating Detection on test set ---"
-python src/evaluate.py \
+python3 src/evaluate.py \
     --model_path outputs/st-detection/best \
     --test_file "$TEST_FILE" \
     --mode detection_only \
@@ -64,7 +64,7 @@ echo "========================================"
 echo "  [2/4] Single-Task: Normalization Only"
 echo "========================================"
 
-python src/train.py \
+python3 src/train.py \
     --mode normalization_only \
     --run_name st-normalization \
     --train_file "$TRAIN_FILE" \
@@ -77,7 +77,7 @@ python src/train.py \
     --fp16
 
 echo "--- Evaluating Normalization on test set ---"
-python src/evaluate.py \
+python3 src/evaluate.py \
     --model_path outputs/st-normalization/best \
     --test_file "$TEST_FILE" \
     --mode normalization_only \
@@ -91,7 +91,7 @@ echo "========================================"
 echo "  [3/4] MTL: Equal Weighting"
 echo "========================================"
 
-python src/train.py \
+python3 src/train.py \
     --mode mtl \
     --run_name mtl-equal \
     --train_file "$TRAIN_FILE" \
@@ -104,7 +104,7 @@ python src/train.py \
     --fp16
 
 echo "--- Evaluating MTL-Equal on test set ---"
-python src/evaluate.py \
+python3 src/evaluate.py \
     --model_path outputs/mtl-equal/best \
     --test_file "$TEST_FILE" \
     --mode mtl \
@@ -118,7 +118,7 @@ echo "========================================"
 echo "  [4/4] MTL: PCGrad"
 echo "========================================"
 
-python src/train.py \
+python3 src/train.py \
     --mode mtl \
     --use_pcgrad \
     --run_name mtl-pcgrad \
@@ -132,7 +132,7 @@ python src/train.py \
     --fp16
 
 echo "--- Evaluating MTL-PCGrad on test set ---"
-python src/evaluate.py \
+python3 src/evaluate.py \
     --model_path outputs/mtl-pcgrad/best \
     --test_file "$TEST_FILE" \
     --mode mtl \
