@@ -196,6 +196,12 @@ def main():
     if len(table.data) > 0:
         wandb.log({"test/predictions": table})
 
+    # Save model checkpoint as WandB artifact
+    print(f"\nUploading model artifact from {args.model_path}...")
+    artifact = wandb.Artifact(name=f"model-{args.run_name}", type="model", metadata=metrics)
+    artifact.add_dir(args.model_path)
+    wandb.log_artifact(artifact)
+
     wandb.finish()
     print("Evaluation complete!")
 
