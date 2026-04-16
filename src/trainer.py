@@ -16,7 +16,8 @@ from typing import Dict, Optional
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
-from torch.cuda.amp import GradScaler, autocast
+from torch.cuda.amp import GradScaler
+import torch.amp
 
 import wandb
 
@@ -283,7 +284,7 @@ class MTLTrainer:
 
     def _standard_step(self, batch: Dict, step: int, accum: int) -> Dict:
         """Standard forward + backward for single-task or equal-weight MTL."""
-        amp_ctx = autocast(dtype=torch.float16) if self.fp16 else torch.cuda.amp.autocast(enabled=False)
+        amp_ctx = torch.amp.autocast('cuda', dtype=torch.float16) if self.fp16 else torch.amp.autocast('cuda', enabled=False)
 
         with amp_ctx:
             outputs = self.model(**batch)
