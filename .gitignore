@@ -2,6 +2,5 @@ data/tokenizer_corpus/vien_corpus.txt
 tmp_venv/
 __pycache__/
 *.pyc
-outputs/
 wandb/
 results_evaluation.md
