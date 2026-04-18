@@ -2,10 +2,8 @@
 Extrinsic Evaluation: Lexical Normalization → Emotion Classification.
 
 Evaluates the impact of lexical normalization on downstream emotion
-classification (UIT-VSMEC dataset) using 3 classifiers:
-  1. TextCNN (Embedding + Convs + MaxPool)
-  2. BiLSTM (Embedding + BiLSTM + Linear)
-  3. GRU (Embedding + GRU + Linear)
+classification (UIT-VSMEC dataset) using:
+  1. PhoBERT-base-v2 (Transformer fine-tuning)
 
 Pipeline:
   1. Download normalization checkpoint from WandB artifacts
@@ -51,32 +49,11 @@ EMOTION_LABELS = [
 ]
 
 CLASSIFIER_CONFIGS = {
-    "textcnn": {
-        "embed_dim": 300,
-        "num_filters": 256,
-        "filter_sizes": [3, 4, 5],
-        "dropout": 0.5,
-        "epochs": 10,
-        "lr": 1e-3,
-        "batch_size": 32,
-    },
-    "bilstm": {
-        "embed_dim": 300,
-        "hidden_dim": 150,
-        "num_layers": 2,
-        "dropout": 0.3,
-        "epochs": 10,
-        "lr": 1e-3,
-        "batch_size": 32,
-    },
-    "gru": {
-        "embed_dim": 300,
-        "hidden_dim": 180,
-        "num_layers": 2,
-        "dropout": 0.3,
-        "epochs": 10,
-        "lr": 1e-3,
-        "batch_size": 32,
+    "phobert": {
+        "model_name": "vinai/phobert-base-v2",
+        "epochs": 3,
+        "lr": 2e-5,
+        "batch_size": 16,
     },
 }
 
@@ -346,298 +323,7 @@ def train_and_eval_phobert(
 
 
 # ═══════════════════════════════════════════════════════════════
-# 5. Classifier: BiLSTM / GRU (RNN-based)
-# ═══════════════════════════════════════════════════════════════
 
-class Vocabulary:
-    """Simple word-level vocabulary."""
-
-    def __init__(self, max_size: int = 30000):
-        self.word2idx = {"<pad>": 0, "<unk>": 1}
-        self.idx2word = {0: "<pad>", 1: "<unk>"}
-        self.max_size = max_size
-
-    def build(self, texts: List[str]):
-        counter = Counter()
-        for text in texts:
-            counter.update(text.lower().split())
-
-        for word, _ in counter.most_common(self.max_size - 2):
-            idx = len(self.word2idx)
-            self.word2idx[word] = idx
-            self.idx2word[idx] = word
-
-        print(f"  Vocabulary size: {len(self.word2idx)}")
-
-    def encode(self, text: str, max_len: int = 128) -> List[int]:
-        tokens = text.lower().split()[:max_len]
-        ids = [self.word2idx.get(t, 1) for t in tokens]
-        # Pad
-        ids += [0] * (max_len - len(ids))
-        return ids
-
-    def __len__(self):
-        return len(self.word2idx)
-
-
-class RNNTextDataset(Dataset):
-    """Dataset for BiLSTM/GRU classifiers."""
-
-    def __init__(self, texts: List[str], labels: List[int], vocab: Vocabulary, max_len: int = 128):
-        self.input_ids = torch.tensor(
-            [vocab.encode(t, max_len) for t in texts], dtype=torch.long
-        )
-        self.labels = torch.tensor(labels, dtype=torch.long)
-
-    def __len__(self):
-        return len(self.labels)
-
-    def __getitem__(self, idx):
-        return {
-            "input_ids": self.input_ids[idx],
-            "labels": self.labels[idx],
-        }
-
-
-class BiLSTMClassifier(nn.Module):
-    """BiLSTM text classifier."""
-
-    def __init__(self, vocab_size, embed_dim, hidden_dim, num_classes, num_layers=2, dropout=0.3):
-        super().__init__()
-        self.embedding = nn.Embedding(vocab_size, embed_dim, padding_idx=0)
-        self.lstm = nn.LSTM(
-            embed_dim, hidden_dim, num_layers=num_layers,
-            batch_first=True, bidirectional=True, dropout=dropout if num_layers > 1 else 0,
-        )
-        self.dropout = nn.Dropout(dropout)
-        self.fc = nn.Linear(hidden_dim * 2, num_classes)
-
-    def forward(self, input_ids):
-        embedded = self.dropout(self.embedding(input_ids))
-        output, (hidden, _) = self.lstm(embedded)
-        # Concat last hidden states from both directions
-        hidden = torch.cat((hidden[-2], hidden[-1]), dim=1)
-        return self.fc(self.dropout(hidden))
-
-
-class GRUClassifier(nn.Module):
-    """GRU text classifier."""
-
-    def __init__(self, vocab_size, embed_dim, hidden_dim, num_classes, num_layers=2, dropout=0.3):
-        super().__init__()
-        self.embedding = nn.Embedding(vocab_size, embed_dim, padding_idx=0)
-        self.gru = nn.GRU(
-            embed_dim, hidden_dim, num_layers=num_layers,
-            batch_first=True, bidirectional=True, dropout=dropout if num_layers > 1 else 0,
-        )
-        self.dropout = nn.Dropout(dropout)
-        self.fc = nn.Linear(hidden_dim * 2, num_classes)
-
-    def forward(self, input_ids):
-        embedded = self.dropout(self.embedding(input_ids))
-        output, hidden = self.gru(embedded)
-        hidden = torch.cat((hidden[-2], hidden[-1]), dim=1)
-        return self.fc(self.dropout(hidden))
-
-
-class TextCNNClassifier(nn.Module):
-    """TextCNN classifier."""
-
-    def __init__(self, vocab_size, embed_dim, num_filters, filter_sizes, num_classes, dropout=0.5):
-        super().__init__()
-        self.embedding = nn.Embedding(vocab_size, embed_dim, padding_idx=0)
-        self.convs = nn.ModuleList([
-            nn.Conv1d(in_channels=embed_dim, out_channels=num_filters, kernel_size=fs)
-            for fs in filter_sizes
-        ])
-        self.dropout = nn.Dropout(dropout)
-        self.fc = nn.Linear(len(filter_sizes) * num_filters, num_classes)
-
-    def forward(self, input_ids):
-        embedded = self.embedding(input_ids)
-        embedded = embedded.permute(0, 2, 1) # Convert to (batch_size, embed_dim, seq_len)
-        
-        conved = [F.relu(conv(embedded)) for conv in self.convs]
-        pooled = [F.max_pool1d(conv, conv.shape[2]).squeeze(2) for conv in conved]
-        
-        cat = self.dropout(torch.cat(pooled, dim=1))
-        return self.fc(cat)
-
-
-def train_model(
-    model: nn.Module,
-    train_loader: DataLoader,
-    val_loader: DataLoader,
-    epochs: int,
-    lr: float,
-    model_name: str,
-) -> nn.Module:
-    """Train an RNN classifier (BiLSTM or GRU)."""
-    model = model.to(DEVICE)
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    criterion = nn.CrossEntropyLoss()
-    best_f1 = 0.0
-    best_state = None
-
-    for epoch in range(epochs):
-        model.train()
-        total_loss = 0
-        for batch in train_loader:
-            input_ids = batch["input_ids"].to(DEVICE)
-            labels = batch["labels"].to(DEVICE)
-
-            optimizer.zero_grad()
-            logits = model(input_ids)
-            loss = criterion(logits, labels)
-            loss.backward()
-            nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
-            total_loss += loss.item()
-
-        # Validation
-        model.eval()
-        all_preds, all_labels = [], []
-        with torch.no_grad():
-            for batch in val_loader:
-                input_ids = batch["input_ids"].to(DEVICE)
-                logits = model(input_ids)
-                preds = logits.argmax(dim=-1).cpu().tolist()
-                all_preds.extend(preds)
-                all_labels.extend(batch["labels"].tolist())
-
-        val_f1 = f1_score(all_labels, all_preds, average="macro") * 100
-        avg_loss = total_loss / len(train_loader)
-        print(f"    Epoch {epoch+1}/{epochs} | Loss: {avg_loss:.4f} | Val F1: {val_f1:.2f}%")
-
-        if val_f1 > best_f1:
-            best_f1 = val_f1
-            best_state = {k: v.clone() for k, v in model.state_dict().items()}
-
-    if best_state:
-        model.load_state_dict(best_state)
-    print(f"    Best Val F1: {best_f1:.2f}%")
-    return model
-
-
-def eval_model(model: nn.Module, dataloader: DataLoader) -> float:
-    """Evaluate a classifier. Returns macro_f1."""
-    model.eval()
-    all_preds, all_labels = [], []
-    with torch.no_grad():
-        for batch in dataloader:
-            input_ids = batch["input_ids"].to(DEVICE)
-            logits = model(input_ids)
-            preds = logits.argmax(dim=-1).cpu().tolist()
-            all_preds.extend(preds)
-            all_labels.extend(batch["labels"].tolist())
-
-    f1 = f1_score(all_labels, all_preds, average="macro") * 100
-    return f1
-
-
-
-
-
-def _create_classifier_model(model_type, vocab_size, config):
-    """Create a TextCNN, BiLSTM, or GRU model."""
-    if model_type == "bilstm":
-        return BiLSTMClassifier(
-            vocab_size=vocab_size, embed_dim=config["embed_dim"],
-            hidden_dim=config["hidden_dim"], num_classes=7,
-            num_layers=config["num_layers"], dropout=config["dropout"],
-        )
-    elif model_type == "gru":
-        return GRUClassifier(
-            vocab_size=vocab_size, embed_dim=config["embed_dim"],
-            hidden_dim=config["hidden_dim"], num_classes=7,
-            num_layers=config["num_layers"], dropout=config["dropout"],
-        )
-    elif model_type == "textcnn":
-        return TextCNNClassifier(
-            vocab_size=vocab_size, embed_dim=config["embed_dim"],
-            num_filters=config["num_filters"], filter_sizes=config["filter_sizes"],
-            num_classes=7, dropout=config["dropout"],
-        )
-    else:
-        raise ValueError(f"Unknown model_type: {model_type}")
-
-
-def train_and_eval_classifier(
-    c_type: str,
-    train_texts_raw: List[str],
-    train_labels: List[int],
-    val_texts_raw: List[str],
-    val_labels: List[int],
-    test_texts_raw: List[str],
-    train_texts_norm: List[str],
-    val_texts_norm: List[str],
-    test_texts_norm: List[str],
-    test_labels: List[int],
-    config: dict,
-) -> Dict[str, float]:
-    """Train and evaluate a classifier twice: raw vs normalized."""
-    name = c_type.upper()
-    print(f"\n{'='*60}")
-    print(f"  🧠 Training {name} Classifier")
-    print(f"{'='*60}")
-
-    # ── Round 1: Train on RAW → Eval on RAW test ──────────────
-    print(f"\n  --- Round 1: Train on RAW data ---")
-    vocab_raw = Vocabulary(max_size=30000)
-    vocab_raw.build(train_texts_raw)
-
-    train_ds = RNNTextDataset(train_texts_raw, train_labels, vocab_raw)
-    val_ds = RNNTextDataset(val_texts_raw, val_labels, vocab_raw)
-    test_ds_raw = RNNTextDataset(test_texts_raw, test_labels, vocab_raw)
-
-    train_loader = DataLoader(train_ds, batch_size=config["batch_size"], shuffle=True)
-    val_loader = DataLoader(val_ds, batch_size=config["batch_size"] * 2)
-    test_loader_raw = DataLoader(test_ds_raw, batch_size=config["batch_size"] * 2)
-
-    model_raw = _create_classifier_model(c_type, len(vocab_raw), config)
-    total_params = sum(p.numel() for p in model_raw.parameters())
-    print(f"  Total parameters: {total_params:,}")
-
-    model_raw = train_model(
-        model_raw, train_loader, val_loader,
-        epochs=config["epochs"], lr=config["lr"], model_name=f"{name}_raw",
-    )
-    f1_raw = eval_model(model_raw, test_loader_raw)
-    del model_raw
-    torch.cuda.empty_cache()
-
-    # ── Round 2: Train on NORM → Eval on NORM test ────────────
-    print(f"\n  --- Round 2: Train on NORMALIZED data ---")
-    vocab_norm = Vocabulary(max_size=30000)
-    vocab_norm.build(train_texts_norm)
-
-    train_ds_n = RNNTextDataset(train_texts_norm, train_labels, vocab_norm)
-    val_ds_n = RNNTextDataset(val_texts_norm, val_labels, vocab_norm)
-    test_ds_norm = RNNTextDataset(test_texts_norm, test_labels, vocab_norm)
-
-    train_loader_n = DataLoader(train_ds_n, batch_size=config["batch_size"], shuffle=True)
-    val_loader_n = DataLoader(val_ds_n, batch_size=config["batch_size"] * 2)
-    test_loader_norm = DataLoader(test_ds_norm, batch_size=config["batch_size"] * 2)
-
-    model_norm = _create_classifier_model(c_type, len(vocab_norm), config)
-    model_norm = train_model(
-        model_norm, train_loader_n, val_loader_n,
-        epochs=config["epochs"], lr=config["lr"], model_name=f"{name}_norm",
-    )
-    f1_norm = eval_model(model_norm, test_loader_norm)
-    del model_norm
-    torch.cuda.empty_cache()
-
-    print(f"\n  {name} Results:")
-    print(f"    F1 (raw train→raw test):   {f1_raw:.2f}%")
-    print(f"    F1 (norm train→norm test): {f1_norm:.2f}%")
-    print(f"    ΔF1:                        {f1_norm - f1_raw:+.2f}%")
-
-    return {
-        "f1_raw": f1_raw,
-        "f1_norm": f1_norm,
-        "delta_f1": f1_norm - f1_raw,
-    }
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -774,28 +460,11 @@ def main():
     #   Round 2: norm train → norm test
     results = {}
 
-    # 4a. TextCNN
-    results["TextCNN"] = train_and_eval_classifier(
-        "textcnn",
+    # 4. PhoBERT
+    results["PhoBERT-base-v2"] = train_and_eval_phobert(
         train_texts, train_labels, val_texts, val_labels, test_texts,
         train_texts_norm, val_texts_norm, test_texts_norm, test_labels,
-        CLASSIFIER_CONFIGS["textcnn"],
-    )
-
-    # 4b. BiLSTM
-    results["BiLSTM"] = train_and_eval_classifier(
-        "bilstm",
-        train_texts, train_labels, val_texts, val_labels, test_texts,
-        train_texts_norm, val_texts_norm, test_texts_norm, test_labels,
-        CLASSIFIER_CONFIGS["bilstm"],
-    )
-
-    # 4c. GRU
-    results["GRU"] = train_and_eval_classifier(
-        "gru",
-        train_texts, train_labels, val_texts, val_labels, test_texts,
-        train_texts_norm, val_texts_norm, test_texts_norm, test_labels,
-        CLASSIFIER_CONFIGS["gru"],
+        CLASSIFIER_CONFIGS["phobert"],
     )
 
     # ── Step 5: Report ─────────────────────────────────────────
