@@ -53,7 +53,7 @@ EMOTION_LABELS = [
 CLASSIFIER_CONFIGS = {
     "lstm": {
         "embed_dim": 300,
-        "hidden_dim": 150,
+        "hidden_dim": 230,
         "num_layers": 2,
         "dropout": 0.3,
         "epochs": 10,
