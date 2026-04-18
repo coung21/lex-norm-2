@@ -52,8 +52,8 @@ EMOTION_LABELS = [
 
 CLASSIFIER_CONFIGS = {
     "textcnn": {
-        "embed_dim": 256,
-        "num_filters": 128,
+        "embed_dim": 300,
+        "num_filters": 256,
         "filter_sizes": [3, 4, 5],
         "dropout": 0.5,
         "epochs": 10,
@@ -61,8 +61,8 @@ CLASSIFIER_CONFIGS = {
         "batch_size": 32,
     },
     "bilstm": {
-        "embed_dim": 256,
-        "hidden_dim": 256,
+        "embed_dim": 300,
+        "hidden_dim": 150,
         "num_layers": 2,
         "dropout": 0.3,
         "epochs": 10,
@@ -70,8 +70,8 @@ CLASSIFIER_CONFIGS = {
         "batch_size": 32,
     },
     "gru": {
-        "embed_dim": 256,
-        "hidden_dim": 256,
+        "embed_dim": 300,
+        "hidden_dim": 180,
         "num_layers": 2,
         "dropout": 0.3,
         "epochs": 10,
