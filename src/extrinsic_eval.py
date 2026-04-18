@@ -152,6 +152,8 @@ def normalize_texts(
     model.eval()
 
     normalized = []
+    confidence_threshold = 0.85
+
     for i in range(0, len(texts), batch_size):
         batch_texts = texts[i : i + batch_size]
         inputs = tokenizer(
@@ -163,16 +165,62 @@ def normalize_texts(
         ).to(DEVICE)
 
         with torch.no_grad():
-            generated_ids = model.generate(
+            outputs = model.generate(
                 input_ids=inputs["input_ids"],
                 attention_mask=inputs["attention_mask"],
                 max_length=max_length,
                 num_beams=beam_size,
                 early_stopping=True,
+                return_dict_in_generate=True,
+                output_scores=True,
             )
 
-        decoded = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
-        normalized.extend([t.strip() for t in decoded])
+        # Calculate generation probabilities map
+        transition_scores = model.bartpho.compute_transition_scores(
+            outputs.sequences, outputs.scores, normalize_logits=True
+        )
+        probs = torch.exp(transition_scores)
+
+        for b_idx in range(len(batch_texts)):
+            orig_text = batch_texts[b_idx]
+            gen_ids = outputs.sequences[b_idx]
+            gen_probs = probs[b_idx].tolist()
+            
+            # Decode generated text
+            norm_text = tokenizer.decode(gen_ids, skip_special_tokens=True).strip()
+
+            # Align tokens to apply confidence threshold filter
+            import difflib
+            orig_words = orig_text.split()
+            norm_words = norm_text.split()
+            
+            # Get average sequence confidence as fallback proxy for word confidence
+            valid_probs = [p for p in gen_probs if p > 0.0]
+            seq_conf = sum(valid_probs) / len(valid_probs) if valid_probs else 0.0
+
+            # If the generated sequence has very low confidence overall, revert entirely
+            if seq_conf < (confidence_threshold - 0.15):
+                normalized.append(orig_text)
+                continue
+
+            # Token-level blending using SequenceMatcher
+            sm = difflib.SequenceMatcher(None, orig_words, norm_words)
+            blended_words = []
+            
+            for tag, i1, i2, j1, j2 in sm.get_opcodes():
+                if tag == "equal":
+                    blended_words.extend(orig_words[i1:i2])
+                else:
+                    # For modifications (replace, insert, delete)
+                    # If high sequence confidence, we trust the normalization, 
+                    # but if it's borderline, we retain the original token.
+                    if seq_conf >= confidence_threshold:
+                        blended_words.extend(norm_words[j1:j2])
+                    else:
+                        blended_words.extend(orig_words[i1:i2])
+            
+            final_text = " ".join(blended_words).strip()
+            normalized.append(final_text)
 
         if (i // batch_size + 1) % 10 == 0:
             print(f"  Normalized {min(i + batch_size, len(texts))}/{len(texts)} samples...")
@@ -180,7 +228,7 @@ def normalize_texts(
     print(f"  ✅ Normalization complete: {len(normalized)} texts")
 
     # Show samples
-    print(f"\n  📋 Sample normalizations:")
+    print(f"\n  📋 Sample normalizations (with Confidence Threshold > {confidence_threshold}):")
     for j in range(min(5, len(texts))):
         changed = "🔄" if texts[j] != normalized[j] else "✅"
         print(f"    {changed} \"{texts[j]}\" → \"{normalized[j]}\"")
