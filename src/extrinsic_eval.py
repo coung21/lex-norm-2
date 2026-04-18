@@ -127,12 +127,12 @@ def load_vsmec_dataset() -> Tuple[List[str], List[str], List[str], List[str], Li
     print("\n📂 Loading UIT-VSMEC dataset from HuggingFace...")
     ds = load_dataset("tridm/UIT-VSMEC")
 
-    train_texts = ds["train"]["Sentence"]
-    train_labels = ds["train"]["Emotion"]
-    val_texts = ds["validation"]["Sentence"]
-    val_labels = ds["validation"]["Emotion"]
-    test_texts = ds["test"]["Sentence"]
-    test_labels = ds["test"]["Emotion"]
+    train_texts = list(ds["train"]["Sentence"])
+    train_labels = list(ds["train"]["Emotion"])
+    val_texts = list(ds["validation"]["Sentence"])
+    val_labels = list(ds["validation"]["Emotion"])
+    test_texts = list(ds["test"]["Sentence"])
+    test_labels = list(ds["test"]["Emotion"])
 
     print(f"  Train: {len(train_texts)} | Val: {len(val_texts)} | Test: {len(test_texts)}")
     print(f"  Label distribution (train): {Counter(train_labels).most_common()}")
