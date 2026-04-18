@@ -691,7 +691,12 @@ def main():
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
+    print("\n🚀 Starting Extrinsic Evaluation Pipeline...")
+    print(f"  Project: {args.wandb_project}")
+    print(f"  Artifact: {args.wandb_artifact}")
+
     # ── WandB Init ─────────────────────────────────────────────
+    # If it hangs here, ensure you have ran 'wandb login' or set WANDB_API_KEY
     wandb.init(
         project=args.wandb_project,
         name="extrinsic-eval",

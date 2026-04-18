@@ -10,7 +10,8 @@
 set -e
 
 # ── Install dependencies ───────────────────────────────────────
-pip install -q transformers sentencepiece torch wandb accelerate \
+echo "Installing dependencies (this may take a minute)..."
+pip install transformers sentencepiece torch wandb accelerate \
     pandas numpy scikit-learn datasets
 
 # ── Run extrinsic evaluation ──────────────────────────────────
