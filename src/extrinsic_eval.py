@@ -1,8 +1,8 @@
 """
 Extrinsic Evaluation: Lexical Normalization → Emotion Classification.
 
-Evaluates the impact of lexical normalization on downstream emotion
-classification (UIT-VSMEC dataset) using:
+Evaluates the impact of lexical normalization on downstream hate speech
+classification (ViHSD dataset) using:
   1. LSTM (Embedding + LSTM + Linear)
   2. BiLSTM (Embedding + BiLSTM + Linear)
   3. GRU (Embedding + GRU + Linear)
@@ -47,7 +47,7 @@ import wandb
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 EMOTION_LABELS = [
-    "Enjoyment", "Sadness", "Anger", "Fear", "Disgust", "Surprise", "Other"
+    "CLEAN", "OFFENSIVE", "HATE"
 ]
 
 CLASSIFIER_CONFIGS = {
@@ -116,27 +116,51 @@ def download_checkpoint_from_wandb(
 
 
 # ═══════════════════════════════════════════════════════════════
-# 2. Dataset Loading
+# 2. Dataset Loading (ViHSD)
 # ═══════════════════════════════════════════════════════════════
 
-def load_vsmec_dataset() -> Tuple[List[str], List[str], List[str], List[str], List[str], List[str]]:
+def load_vihsd_dataset() -> Tuple[List[str], List[str], List[str], List[str], List[str], List[str]]:
     """
-    Load UIT-VSMEC from HuggingFace datasets.
+    Load ViHSD from HuggingFace datasets (uitnlp/vihsd).
 
     Returns:
         train_texts, train_labels, val_texts, val_labels, test_texts, test_labels
     """
     from datasets import load_dataset
 
-    print("\n📂 Loading UIT-VSMEC dataset from HuggingFace...")
-    ds = load_dataset("tridm/UIT-VSMEC")
+    print("\n📂 Loading ViHSD dataset from HuggingFace (uitnlp/vihsd)...")
+    try:
+        ds = load_dataset("uitnlp/vihsd")
+    except Exception as e:
+        print(f"❌ Could not load uitnlp/vihsd: {e}")
+        print("Note: If the dataset is gated, you must run 'huggingface-cli login' first.")
+        sys.exit(1)
 
-    train_texts = list(ds["train"]["Sentence"])
-    train_labels = list(ds["train"]["Emotion"])
-    val_texts = list(ds["validation"]["Sentence"])
-    val_labels = list(ds["validation"]["Emotion"])
-    test_texts = list(ds["test"]["Sentence"])
-    test_labels = list(ds["test"]["Emotion"])
+    # Some versions might use 'free_text', 'text', or 'comment', and 'label_id' or 'label'
+    def extract_texts(split_ds):
+        if "free_text" in split_ds.features:
+            return list(split_ds["free_text"])
+        if "comment" in split_ds.features:
+            return list(split_ds["comment"])
+        if "text" in split_ds.features:
+            return list(split_ds["text"])
+        raise ValueError(f"Unknown text column in: {list(split_ds.features.keys())}")
+
+    def extract_labels(split_ds):
+        if "label_id" in split_ds.features:
+            return list(split_ds["label_id"])
+        if "label" in split_ds.features:
+            return list(split_ds["label"])
+        raise ValueError(f"Unknown label column in: {list(split_ds.features.keys())}")
+
+    train_texts = extract_texts(ds["train"])
+    train_labels = extract_labels(ds["train"])
+    
+    val_texts = extract_texts(ds["validation"])
+    val_labels = extract_labels(ds["validation"])
+
+    test_texts = extract_texts(ds["test"])
+    test_labels = extract_labels(ds["test"])
 
     print(f"  Train: {len(train_texts)} | Val: {len(val_texts)} | Test: {len(test_texts)}")
     print(f"  Label distribution (train): {Counter(train_labels).most_common()}")
@@ -405,22 +429,23 @@ def eval_model(model: nn.Module, dataloader: DataLoader) -> float:
 
 def _create_classifier_model(model_type, vocab_size, config):
     """Create a LSTM, BiLSTM, or GRU model."""
+    num_classes = len(EMOTION_LABELS)  # Now 3 for ViHSD
     if model_type == "lstm":
         return LSTMClassifier(
             vocab_size=vocab_size, embed_dim=config["embed_dim"],
-            hidden_dim=config["hidden_dim"], num_classes=7,
+            hidden_dim=config["hidden_dim"], num_classes=num_classes,
             num_layers=config["num_layers"], dropout=config["dropout"],
         )
     elif model_type == "bilstm":
         return BiLSTMClassifier(
             vocab_size=vocab_size, embed_dim=config["embed_dim"],
-            hidden_dim=config["hidden_dim"], num_classes=7,
+            hidden_dim=config["hidden_dim"], num_classes=num_classes,
             num_layers=config["num_layers"], dropout=config["dropout"],
         )
     elif model_type == "gru":
         return GRUClassifier(
             vocab_size=vocab_size, embed_dim=config["embed_dim"],
-            hidden_dim=config["hidden_dim"], num_classes=7,
+            hidden_dim=config["hidden_dim"], num_classes=num_classes,
             num_layers=config["num_layers"], dropout=config["dropout"],
         )
     else:
@@ -516,9 +541,9 @@ def train_and_eval_classifier(
 def generate_report(results: Dict[str, Dict], output_path: str):
     """Generate markdown report with comparison table."""
     lines = [
-        "# Extrinsic Evaluation: Lexical Normalization → Emotion Classification",
+        "# Extrinsic Evaluation: Lexical Normalization → Hate Speech Detection",
         "",
-        "## Dataset: UIT-VSMEC (7 emotion classes)",
+        "## Dataset: ViHSD (3 classes: CLEAN, OFFENSIVE, HATE)",
         "",
         "## Tổng Hợp Kết Quả (Macro F1 trên Test Set)",
         "",
@@ -594,15 +619,21 @@ def main():
 
     # ── Step 2: Load dataset ───────────────────────────────────
     train_texts, train_labels_str, val_texts, val_labels_str, test_texts, test_labels_str = (
-        load_vsmec_dataset()
+        load_vihsd_dataset()
     )
 
-    # Encode labels
-    le = LabelEncoder()
-    le.fit(EMOTION_LABELS)
-    train_labels = le.transform(train_labels_str).tolist()
-    val_labels = le.transform(val_labels_str).tolist()
-    test_labels = le.transform(test_labels_str).tolist()
+    # Encode labels (handle both string labels and integer labels)
+    if isinstance(train_labels_str[0], str):
+        le = LabelEncoder()
+        le.fit(EMOTION_LABELS)
+        train_labels = le.transform(train_labels_str).tolist()
+        val_labels = le.transform(val_labels_str).tolist()
+        test_labels = le.transform(test_labels_str).tolist()
+    else:
+        # If dataset already returns integers
+        train_labels = train_labels_str
+        val_labels = val_labels_str
+        test_labels = test_labels_str
 
     # ── Step 3: Normalize train + val + test sets ──────────────
     print(f"\n{'='*60}")
