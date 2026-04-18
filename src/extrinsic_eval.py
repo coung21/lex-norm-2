@@ -139,12 +139,16 @@ def load_vihsd_dataset() -> Tuple[List[str], List[str], List[str], List[str], Li
     # Some versions might use 'free_text', 'text', or 'comment', and 'label_id' or 'label'
     def extract_texts(split_ds):
         if "free_text" in split_ds.features:
-            return list(split_ds["free_text"])
-        if "comment" in split_ds.features:
-            return list(split_ds["comment"])
-        if "text" in split_ds.features:
-            return list(split_ds["text"])
-        raise ValueError(f"Unknown text column in: {list(split_ds.features.keys())}")
+            texts = list(split_ds["free_text"])
+        elif "comment" in split_ds.features:
+            texts = list(split_ds["comment"])
+        elif "text" in split_ds.features:
+            texts = list(split_ds["text"])
+        else:
+            raise ValueError(f"Unknown text column in: {list(split_ds.features.keys())}")
+        
+        # Replace None with empty string and cast to string to prevent Tokenizer ValueError
+        return ["" if t is None else str(t) for t in texts]
 
     def extract_labels(split_ds):
         if "label_id" in split_ds.features:
