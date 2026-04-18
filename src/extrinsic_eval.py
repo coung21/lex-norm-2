@@ -176,8 +176,9 @@ def normalize_texts(
             )
 
         # Calculate generation probabilities map
+        beam_indices = getattr(outputs, "beam_indices", None)
         transition_scores = model.bartpho.compute_transition_scores(
-            outputs.sequences, outputs.scores, normalize_logits=True
+            outputs.sequences, outputs.scores, beam_indices=beam_indices, normalize_logits=True
         )
         probs = torch.exp(transition_scores)
 
