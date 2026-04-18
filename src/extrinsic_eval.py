@@ -268,13 +268,10 @@ def _train_phobert_once(
     result = trainer.predict(test_ds)
     preds = np.argmax(result.predictions, axis=-1)
     f1 = f1_score(test_labels, preds, average="macro") * 100
-    report = classification_report(
-        test_labels, preds, target_names=EMOTION_LABELS, output_dict=True
-    )
 
     del model, trainer
     torch.cuda.empty_cache()
-    return f1, preds, report
+    return f1, preds
 
 
 def train_and_eval_phobert(
@@ -296,14 +293,14 @@ def train_and_eval_phobert(
 
     # Round 1: Train on raw → Eval on raw test
     print(f"\n  --- Round 1: Train on RAW data ---")
-    f1_raw, raw_preds, raw_report = _train_phobert_once(
+    f1_raw, raw_preds = _train_phobert_once(
         train_texts_raw, train_labels, val_texts_raw, val_labels,
         test_texts_raw, test_labels, config, "raw",
     )
 
     # Round 2: Train on norm → Eval on norm test
     print(f"\n  --- Round 2: Train on NORMALIZED data ---")
-    f1_norm, norm_preds, norm_report = _train_phobert_once(
+    f1_norm, norm_preds = _train_phobert_once(
         train_texts_norm, train_labels, val_texts_norm, val_labels,
         test_texts_norm, test_labels, config, "norm",
     )
@@ -317,8 +314,6 @@ def train_and_eval_phobert(
         "f1_raw": f1_raw,
         "f1_norm": f1_norm,
         "delta_f1": f1_norm - f1_raw,
-        "raw_report": raw_report,
-        "norm_report": norm_report,
     }
 
 
