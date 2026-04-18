@@ -519,8 +519,8 @@ def train_model(
     return model
 
 
-def eval_rnn_model(model: nn.Module, dataloader: DataLoader) -> Tuple[float, List[int]]:
-    """Evaluate an RNN classifier. Returns (macro_f1, predictions)."""
+def eval_model(model: nn.Module, dataloader: DataLoader) -> float:
+    """Evaluate a classifier. Returns macro_f1."""
     model.eval()
     all_preds, all_labels = [], []
     with torch.no_grad():
@@ -533,6 +533,9 @@ def eval_rnn_model(model: nn.Module, dataloader: DataLoader) -> Tuple[float, Lis
 
     f1 = f1_score(all_labels, all_preds, average="macro") * 100
     return f1
+
+
+
 
 
 def _create_classifier_model(model_type, vocab_size, config):
